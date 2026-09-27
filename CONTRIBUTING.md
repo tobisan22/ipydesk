@@ -26,7 +26,7 @@ ipydesk/
 | TypeScript のビルド | `npm run compile`（`npm run watch` で常時） |
 | 拡張のデバッグ | VS Code で F5（Run Extension） |
 | Python のテスト | `cd python && pip install -e . && pytest` |
-| vsix の作成 | `npx @vscode/vsce package` |
+| vsix の作成 | `npm run package`（→ `ipydesk-win32-x64-<version>.vsix`） |
 
 ## リリース手順
 

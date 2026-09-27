@@ -1,20 +1,19 @@
 {
   "name": "ipydesk",
-  "displayName": "IPyDesk - Persistent Python Session Runner",
-  "description": "F5 runs your script in a persistent IPython session: breakpoints work without debugpy, and variables and figures stay alive after the run.",
+  "displayName": "IPyDesk",
+  "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
   "version": "0.0.1",
   "publisher": "bisan",
   "license": "MIT",
   "icon": "media/icon.png",
-  "repository": { "type": "git", "url": "https://example.invalid/ipydesk" },
   "engines": { "vscode": "^1.85.0" },
-  "categories": ["Debuggers", "Extension Packs","Visualization"],
+  "categories": ["Debuggers", "Visualization"],
   "activationEvents": ["onLanguage:python"],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
-        { "id": "ipydesk", "title": "IPyDesk", "icon": "media/workspace.svg" }
+        { "id": "ipydesk", "title": "IPyDesk", "icon": "media/activitybar.svg" }
       ]
     },
     "views": {
@@ -133,6 +132,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
+    "package": "npx @vscode/vsce package --target win32-x64 --allow-missing-repository",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./"
   },

@@ -1,0 +1,5 @@
+# 改行は LF で管理する。Windows のエディタ設定で全行が差分になるのを防ぐ。
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.vsix binary
