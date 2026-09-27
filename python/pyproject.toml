@@ -1,0 +1,27 @@
+[project]
+name = "ipydesk"
+version = "0.0.1"
+description = "Persistent IPython session runner for VS Code: run Python with editor breakpoints, keep variables and figures alive after the run"
+requires-python = ">=3.9"
+dependencies = [
+    "ipython",
+    "ipdb",
+    "matplotlib",
+    # 既定バックエンドが webagg なので tornado は必須。
+    # 任意扱いにしていると pip install ipydesk だけした人の図が出ない。
+    "tornado",
+]
+
+[project.optional-dependencies]
+qt = ["PyQt5"]
+web = []   # tornado は必須依存へ移動。既存の手順を壊さないため名前だけ残す
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ipydesk*"]
+
+[tool.setuptools.package-data]
+ipydesk = ["images/*.png"]

@@ -1,0 +1,144 @@
+{
+  "name": "ipydesk",
+  "displayName": "IPyDesk - Persistent Python Session Runner",
+  "description": "F5 runs your script in a persistent IPython session: breakpoints work without debugpy, and variables and figures stay alive after the run.",
+  "version": "0.0.1",
+  "publisher": "bisan",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": { "type": "git", "url": "https://example.invalid/ipydesk" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Debuggers", "Extension Packs","Visualization"],
+  "activationEvents": ["onLanguage:python"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "ipydesk", "title": "IPyDesk", "icon": "media/workspace.svg" }
+      ]
+    },
+    "views": {
+      "ipydesk": [
+        { "type": "webview", "id": "ipydesk.workspace", "name": "Workspace" }
+      ]
+    },
+    "commands": [
+      { "command": "ipydesk.run",      "title": "IPyDesk: Run with Breakpoints", "icon": "$(debug-start)" },
+      { "command": "ipydesk.runInNewSession", "title": "IPyDesk: Run in New Session", "icon": "$(debug-alt)" },
+      { "command": "ipydesk.runStopOnError",  "title": "IPyDesk: Run (Stop on Error)" },
+      { "command": "ipydesk.debugLastError",  "title": "IPyDesk: Debug Last Error", "icon": "$(bug)" },
+      { "command": "ipydesk.selectSession",   "title": "IPyDesk: Select Session" },
+      { "command": "ipydesk.runCell",           "title": "IPyDesk: Run Cell (# %%)" },
+      { "command": "ipydesk.runCellAndAdvance", "title": "IPyDesk: Run Cell and Advance" },
+      { "command": "ipydesk.runSelection",      "title": "IPyDesk: Run Selection / Line" },
+      { "command": "ipydesk.useCellKeys",       "title": "IPyDesk: Use IPyDesk Cell Keys (fix Ctrl+Enter conflict)" },
+      { "command": "ipydesk.continue", "title": "IPyDesk: Continue",             "icon": "$(debug-continue)" },
+      { "command": "ipydesk.stepOver", "title": "IPyDesk: Step Over",            "icon": "$(debug-step-over)" },
+      { "command": "ipydesk.stepInto", "title": "IPyDesk: Step Into",            "icon": "$(debug-step-into)" },
+      { "command": "ipydesk.stepOut",  "title": "IPyDesk: Step Out",             "icon": "$(debug-step-out)" },
+      { "command": "ipydesk.stop",     "title": "IPyDesk: Quit Debugger (q)", "icon": "$(debug-stop)" },
+      { "command": "ipydesk.restart",  "title": "IPyDesk: Restart Session",      "icon": "$(debug-restart)" },
+      { "command": "ipydesk.openFigures", "title": "IPyDesk: Open Figures", "icon": "$(graph)" },
+      { "command": "ipydesk.copyFigure", "title": "IPyDesk: Copy Figure Image", "icon": "$(copy)" }
+    ],
+    "keybindings": [
+      { "command": "ipydesk.run",      "key": "f5",             "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
+      { "command": "ipydesk.runCell",           "key": "ctrl+enter",       "when": "editorTextFocus && editorLangId == python && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible" },
+      { "command": "ipydesk.runCellAndAdvance", "key": "shift+enter",      "when": "editorTextFocus && editorLangId == python && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible" },
+      { "command": "ipydesk.runSelection",      "key": "ctrl+shift+enter", "when": "editorTextFocus && editorLangId == python && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible" },
+      { "command": "ipydesk.continue", "key": "f5",             "when": "ipydesk.stopped" },
+      { "command": "ipydesk.stepOver", "key": "f10",            "when": "ipydesk.stopped" },
+      { "command": "ipydesk.stepInto", "key": "f11",            "when": "ipydesk.stopped" },
+      { "command": "ipydesk.stepOut",  "key": "shift+f11",      "when": "ipydesk.stopped" },
+      { "command": "ipydesk.stop",     "key": "shift+f5",       "when": "ipydesk.stopped" },
+      { "command": "ipydesk.restart",  "key": "ctrl+shift+f5",  "when": "editorLangId == python" },
+      { "command": "ipydesk.runInNewSession", "key": "ctrl+alt+f5", "when": "editorLangId == python && !inDebugMode" },
+      { "command": "ipydesk.runStopOnError",  "key": "alt+f5",      "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
+      { "command": "ipydesk.copyFigure", "key": "ctrl+c",       "when": "activeWebviewPanelId == 'ipydeskFigure' || ipydesk.figureActive" }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "ipydesk.openFigures", "when": "!ipydesk.noFigureTabs" },
+        { "command": "ipydesk.copyFigure",  "when": "!ipydesk.noFigureTabs" }
+      ],
+      "editor/title/run": [
+        { "command": "ipydesk.run", "when": "editorLangId == python", "group": "navigation@0" },
+        { "command": "ipydesk.runInNewSession", "when": "editorLangId == python", "group": "navigation@1" }
+      ],
+      "editor/title": [
+        { "command": "ipydesk.stop",     "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@0" },
+        { "command": "ipydesk.continue", "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@1" },
+        { "command": "ipydesk.stepOver", "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@2" },
+        { "command": "ipydesk.stepInto", "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@3" },
+        { "command": "ipydesk.stepOut",  "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@4" },
+        { "command": "ipydesk.restart",  "when": "editorLangId == python && !ipydesk.stopped", "group": "navigation@1" },
+        { "command": "ipydesk.openFigures", "when": "editorLangId == python && !ipydesk.noFigureTabs", "group": "navigation@9" },
+        { "command": "ipydesk.copyFigure", "when": "activeWebviewPanelId == 'ipydeskFigure' || ipydesk.figureActive", "group": "navigation@9" }
+      ]
+    },
+    "configuration": {
+      "title": "IPyDesk",
+      "properties": {
+        "ipydesk.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "IPython セッションを起動する Python 実行ファイル"
+        },
+        "ipydesk.webaggPort": {
+        "type": "number",
+        "default": 8988,
+        "description": "matplotlib webagg バックエンドのポート（IPYDESK_PORT と一致させる）"
+        },
+        "ipydesk.useBundledPython": {
+          "type": "boolean",
+          "default": true,
+          "description": "拡張に同梱した ipydesk を PYTHONPATH 経由で使う（pip install 不要）。ipydesk/ を編集して開発する場合は false にする — true のままだと同梱版が pip install -e を隠してしまう"
+        },
+        "ipydesk.figureDisplay": {
+          "type": "string",
+          "enum": ["tab", "manual", "window", "none"],
+          "enumDescriptions": [
+            "VS Code のタブに出す。figure ごとに 1 タブ、作られたら自動で開く",
+            "VS Code のタブに出すが自動では開かない。📈 IPyDesk: Open Figures で開く",
+            "OS の別ウィンドウに出す（matplotlib の Qt / Tk バックエンド）。タブ・📋 コピー・保存ダイアログは使えない",
+            "図を表示しない。webagg サーバーを起動せずポートも使わない（Agg バックエンド）。plt.show() は何もせず、savefig は使える"
+          ],
+          "default": "tab",
+          "description": "matplotlib の figure をどこに表示するか。変更したら Ctrl+Shift+F5 でセッションを作り直す"
+        },
+        "ipydesk.windowBackend": {
+          "type": "string",
+          "enum": ["auto", "qt", "tk"],
+          "enumDescriptions": [
+            "PyQt / PySide があれば Qt、無ければ Tk",
+            "Qt（PyQt5 / PyQt6 / PySide2 / PySide6 のいずれかが必要）",
+            "Tk（標準の tkinter）"
+          ],
+          "default": "auto",
+          "description": "ipydesk.figureDisplay が window のときに使う matplotlib バックエンド"
+        },
+        "ipydesk.showCellDecorations": {
+          "type": "boolean",
+          "default": true,
+          "description": "`# %%` の行に区切り線を引き、カーソルのあるセルを薄く強調する"
+        },
+        "ipydesk.autoOpenFigures": {
+          "type": "boolean",
+          "default": true,
+          "description": "（非推奨）ipydesk.figureDisplay に統合されました。false は figureDisplay: manual と同じ",
+          "markdownDeprecationMessage": "`#ipydesk.figureDisplay#` に統合されました。`false` は `manual` に相当します。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

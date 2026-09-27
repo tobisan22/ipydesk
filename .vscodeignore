@@ -1,0 +1,24 @@
+# 開発用ファイル（vsix に入れない）
+.vscode/**
+.vscode-test/**
+.github/**
+src/**
+scripts/**
+docs/**
+_to_delete/**
+.gitignore
+.gitattributes
+.yarnrc
+CONTRIBUTING.md
+**/tsconfig.json
+**/eslint.config.mjs
+**/*.map
+**/*.ts
+**/.vscode-test.*
+
+# Python 側: python/ipydesk/ だけを同梱する
+python/tests/**
+python/pyproject.toml
+python/**/*.egg-info/**
+**/__pycache__/**
+**/.pytest_cache/**
