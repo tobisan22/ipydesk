@@ -37,7 +37,7 @@ MATLAB のように「実行 → 変数を確認 → 一部だけ実行し直す
 | **Ctrl+Shift+Enter** | 選択範囲（選択が無ければ現在行）を実行 |
 | **F5 / F10 / F11 / Shift+F11** | 停止中: 続行 / ステップオーバー / ステップイン / ステップアウト |
 | **Shift+F5** | 停止中: デバッガを抜けてプロンプトへ |
-| **Ctrl+Shift+F5** | セッションを作り直す |
+| **Ctrl+Shift+F5** | New Session：空のセッションを 1 つ追加する（既存のセッションはそのまま、スクリプトは実行しない） |
 | **Ctrl+C** | Figure タブ: 図を画像としてコピー |
 
 ## セル実行
@@ -79,7 +79,7 @@ figure ごとに VS Code のタブが開きます。📋 か Ctrl+C でコピー
 | `ipydesk.showCellDecorations` | `true` | `# %%` の区切り線とセルの強調を表示する |
 | `ipydesk.useBundledPython` | `true` | 同梱の `ipydesk` を使う（通常は変更不要） |
 
-`figureDisplay` を変えたら Ctrl+Shift+F5 でセッションを作り直してください。
+`figureDisplay` を変えたら、通知の「置き換える」を押すか、Ctrl+Shift+F5 で新しいセッションを作ってください。
 
 ## うまく動かないとき
 
@@ -89,7 +89,7 @@ figure ごとに VS Code のタブが開きます。📋 か Ctrl+C でコピー
 | 依存パッケージの確認が毎回出る | `ipydesk.pythonPath` に、パッケージを入れた Python のフルパスを指定する |
 | 図が出ない / タブが空白 | `ipydesk.webaggPort` を別の番号に変えて Ctrl+Shift+F5 |
 | Ctrl+Enter でインタラクティブウィンドウが開く | 「IPyDesk: Use IPyDesk Cell Keys」を実行する |
-| 動きがおかしい | Ctrl+Shift+F5 でセッションを作り直す |
+| 動きがおかしい | Ctrl+Shift+F5 で新しいセッションを作り、おかしくなったセッションのターミナルを閉じる |
 
 拡張の動作ログは `.vscode/py_ext_log.txt` に残ります。拡張は `.vscode/py_*` に連携用のファイルを作るので、
 git で管理している場合は `.gitignore` に `.vscode/py_*` を追加しておくと便利です。

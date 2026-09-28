@@ -4,6 +4,14 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.2] - 2026-09-28
+
+### Changed
+
+- **IPyDesk: Restart Session** を **IPyDesk: New Session** に置き換えました（Ctrl+Shift+F5、エディタ右上のボタン）。既存のセッションを残したまま**空のセッションを 1 つ追加**し、F5 の送り先にします。スクリプトは実行しません（実行したいときは続けて F5）。前のセッションの変数や計算中の処理はそのまま残るので、ターミナルやステータスバーから切り替えて戻れます。要らなくなったセッションはターミナルを閉じてください。
+  - コマンド ID は `ipydesk.restart` → `ipydesk.newSession` に変わりました。
+  - 図の表示先の設定を変えたときは、通知の「置き換える」でアクティブなセッションを空のセッションに置き換えます（古い設定のセッションが残らないように）。
+
 ## [0.0.1] - 2026-09-27
 
 ### Added

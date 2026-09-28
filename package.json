@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "bisan",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -36,7 +36,7 @@
       { "command": "ipydesk.stepInto", "title": "IPyDesk: Step Into",            "icon": "$(debug-step-into)" },
       { "command": "ipydesk.stepOut",  "title": "IPyDesk: Step Out",             "icon": "$(debug-step-out)" },
       { "command": "ipydesk.stop",     "title": "IPyDesk: Quit Debugger (q)", "icon": "$(debug-stop)" },
-      { "command": "ipydesk.restart",  "title": "IPyDesk: Restart Session",      "icon": "$(debug-restart)" },
+      { "command": "ipydesk.newSession", "title": "IPyDesk: New Session",      "icon": "$(add)" },
       { "command": "ipydesk.openFigures", "title": "IPyDesk: Open Figures", "icon": "$(graph)" },
       { "command": "ipydesk.copyFigure", "title": "IPyDesk: Copy Figure Image", "icon": "$(copy)" }
     ],
@@ -50,7 +50,7 @@
       { "command": "ipydesk.stepInto", "key": "f11",            "when": "ipydesk.stopped" },
       { "command": "ipydesk.stepOut",  "key": "shift+f11",      "when": "ipydesk.stopped" },
       { "command": "ipydesk.stop",     "key": "shift+f5",       "when": "ipydesk.stopped" },
-      { "command": "ipydesk.restart",  "key": "ctrl+shift+f5",  "when": "editorLangId == python" },
+      { "command": "ipydesk.newSession",  "key": "ctrl+shift+f5",  "when": "editorLangId == python" },
       { "command": "ipydesk.runInNewSession", "key": "ctrl+alt+f5", "when": "editorLangId == python && !inDebugMode" },
       { "command": "ipydesk.runStopOnError",  "key": "alt+f5",      "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
       { "command": "ipydesk.copyFigure", "key": "ctrl+c",       "when": "activeWebviewPanelId == 'ipydeskFigure' || ipydesk.figureActive" }
@@ -70,7 +70,7 @@
         { "command": "ipydesk.stepOver", "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@2" },
         { "command": "ipydesk.stepInto", "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@3" },
         { "command": "ipydesk.stepOut",  "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@4" },
-        { "command": "ipydesk.restart",  "when": "editorLangId == python && !ipydesk.stopped", "group": "navigation@1" },
+        { "command": "ipydesk.newSession",  "when": "editorLangId == python && !ipydesk.stopped", "group": "navigation@1" },
         { "command": "ipydesk.openFigures", "when": "editorLangId == python && !ipydesk.noFigureTabs", "group": "navigation@9" },
         { "command": "ipydesk.copyFigure", "when": "activeWebviewPanelId == 'ipydeskFigure' || ipydesk.figureActive", "group": "navigation@9" }
       ]

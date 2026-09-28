@@ -1028,19 +1028,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("ipydesk.runSelection", runSelectionOrLine),
     vscode.commands.registerCommand("ipydesk.useCellKeys", installCellKeybindings),
 
-    // アクティブなセッションだけを作り直す（ほかのセッションの計算は止めない）
-    vscode.commands.registerCommand("ipydesk.restart", async () => {
-      if (starting) {   // 片付けだけして起動されない、を避ける
-        vscode.window.setStatusBarMessage("IPyDesk: セッションを起動中です", 3000);
-        return;
-      }
-      const doc = vscode.window.activeTextEditor?.document;
-      const s = active();
-      if (s) {
-        endSession(s);
-        s.terminal.dispose();
-      }
-      await startSession(doc?.languageId === "python" ? doc.uri.fsPath : undefined, undefined, s?.id);
+    // 空のセッションを 1 つ追加して、F5 の送り先にする。既存のセッションは変数も計算もそのまま残す。
+    // スクリプトは実行しない（実行したければ続けて F5）。要らなくなったセッションはターミナルを閉じる。
+    vscode.commands.registerCommand("ipydesk.newSession", async () => {
+      await startSession();
     }),
 
     vscode.commands.registerCommand("ipydesk.openFigures", async () => {
@@ -1238,12 +1229,21 @@ export function activate(context: vscode.ExtensionContext) {
         && !e.affectsConfiguration("ipydesk.autoOpenFigures")) { return; }
       updateFigureTabsContext();
       if (sessions.size === 0) { return; }
+      // 設定変更の反映だけは、古い設定のセッションを残しても紛らわしいので置き換える
       const pick = await vscode.window.showInformationMessage(
-        "IPyDesk: 図の表示先が変わりました。セッションを作り直すと反映されます",
-        "再起動");
-      if (pick === "再起動") {
-        await vscode.commands.executeCommand("ipydesk.restart");
+        "IPyDesk: 図の表示先が変わりました。アクティブなセッションを空のセッションに置き換えると反映されます（変数は消えます）",
+        "置き換える");
+      if (pick !== "置き換える") { return; }
+      if (starting) {   // 片付けだけして起動されない、を避ける
+        vscode.window.setStatusBarMessage("IPyDesk: セッションを起動中です", 3000);
+        return;
       }
+      const s = active();
+      if (s) {
+        endSession(s);
+        s.terminal.dispose();
+      }
+      await startSession(undefined, undefined, s?.id);
     }),
   );
 
