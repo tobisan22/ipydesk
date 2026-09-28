@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "bisan",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -38,7 +38,9 @@
       { "command": "ipydesk.stop",     "title": "IPyDesk: Quit Debugger (q)", "icon": "$(debug-stop)" },
       { "command": "ipydesk.newSession", "title": "IPyDesk: New Session",      "icon": "$(add)" },
       { "command": "ipydesk.openFigures", "title": "IPyDesk: Open Figures", "icon": "$(graph)" },
-      { "command": "ipydesk.copyFigure", "title": "IPyDesk: Copy Figure Image", "icon": "$(copy)" }
+      { "command": "ipydesk.copyFigure", "title": "IPyDesk: Copy Figure Image", "icon": "$(copy)" },
+      { "command": "ipydesk.openVariable", "title": "IPyDesk: Open Variable…", "icon": "$(table)" },
+      { "command": "ipydesk.openDesk", "title": "IPyDesk: Open Desk", "icon": "$(layout)" }
     ],
     "keybindings": [
       { "command": "ipydesk.run",      "key": "f5",             "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
@@ -59,6 +61,13 @@
       "commandPalette": [
         { "command": "ipydesk.openFigures", "when": "!ipydesk.noFigureTabs" },
         { "command": "ipydesk.copyFigure",  "when": "!ipydesk.noFigureTabs" }
+      ],
+      "view/title": [
+        { "command": "ipydesk.openVariable", "when": "view == ipydesk.workspace", "group": "navigation@1" },
+        { "command": "ipydesk.openDesk",     "when": "view == ipydesk.workspace", "group": "navigation@2" }
+      ],
+      "webview/context": [
+        { "command": "ipydesk.openVariable", "when": "webviewId == 'ipydesk.workspace' && webviewSection == 'var'" }
       ],
       "editor/title/run": [
         { "command": "ipydesk.run", "when": "editorLangId == python", "group": "navigation@0" },

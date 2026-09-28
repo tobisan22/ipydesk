@@ -4,6 +4,21 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.3] - 2026-09-28
+
+### Added
+
+- **Variable Editor**（IPyDesk: Open Variable…）: 配列・DataFrame・Series・list を表形式で開きます。Workspace ビューのダブルクリック・右クリック・⊞ から開けます。
+  - 見えている範囲だけを Python に問い合わせる仮想スクロール（巨大な配列でも軽い）。実行・ステップのたびに自動で更新
+  - 範囲を選んで **Plot / X–Y / Scatter / Hist / Image** をワンクリック。プロットは `plt.plot(x[2:7, 1:3])` のようなコードとしてセッションへ送られ、履歴に残ります
+  - Ctrl+C で選択範囲をタブ区切りでコピー、3 次元以上の配列は `[:, :, k]` で面を切り替え
+  - ブレークポイントで停止中は、そのフレームの変数を表示
+- **Open Desk**（IPyDesk: Open Desk）: コード（左）・Figure と Variable Editor（右）・コンソール（下）・Workspace（サイドバー）を 1 コマンドで MATLAB 風に並べます。
+
+### Changed
+
+- プロンプトで打った行や、ブレークポイントで停止中に作った figure も、自動でタブに出るようになりました（figure の一覧が変わったときだけ通知）。
+
 ## [0.0.2] - 2026-09-28
 
 ### Changed

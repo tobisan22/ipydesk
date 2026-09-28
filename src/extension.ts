@@ -9,6 +9,8 @@
  *  - Python 側が書く .vscode/py_figures.json を監視して figure ごとにタブを開く
  *  - Figure タブの 📋 で、その figure の PNG を Windows のクリップボードへ入れる
  *  - Python 側が書く .vscode/py_workspace.json を監視してワークスペースビューに変数を出す
+ *  - Variable Editor: 配列・表を表形式で開き、選択範囲をプロットする（py_varreq_* で問い合わせ）
+ *  - Open Desk: コード・図・変数・コンソールを MATLAB 風の配置に並べる
  *
  * 複数セッション:
  *  - セッションごとに専用ターミナル（IPyDesk, IPyDesk 2, …）と通知ディレクトリ
@@ -30,6 +32,7 @@ import * as path from "path";
 import * as http from "http";
 import { execFile } from "child_process";
 import { WORKSPACE_NAME, WorkspaceViewProvider, WsData } from "./workspaceView";
+import { VariableEditor, VarQuery } from "./variableEditor";
 
 const BP_NAME = "py_breakpoints.json";
 const STATE_NAME = "py_debug_state.json";
@@ -37,6 +40,9 @@ const SESSION_NAME = "py_session.json";
 const FIGURES_NAME = "py_figures.json";
 const SAVE_REQUEST_NAME = "py_save_request.json";   // Python → 拡張 : 保存ダイアログ要求
 const SESSIONS_DIR = "py_sessions";                 // .vscode/py_sessions/<番号>/ にセッション別の通知
+const VAR_REQ_PREFIX = "py_varreq_";                // 拡張 → Python : Variable Editor の問い合わせ
+const VAR_RES_PREFIX = "py_varres_";                // Python → 拡張 : その答え
+const VAR_TIMEOUT_MS = 5000;
 
 // ipydesk 本体は同梱するが、これらは利用者の Python に入っている必要がある
 const REQUIRED_MODULES = [
@@ -373,8 +379,10 @@ export function activate(context: vscode.ExtensionContext) {
   //  - 停止行（赤丸・エラー）はコードのグループに出す。Figure 側に同じスクリプトを開かない
   //  - Figure タブは、既に Figure があるグループにまとめて開く
   //  - Figure を開いたせいでアクティブなグループが Figure 側へ移ったら、コード側へ戻す
+  // 「図のグループ」には Variable Editor も並べる（どちらも実行結果を見る場所）
   const isFigureTab = (t: vscode.Tab) =>
-    t.input instanceof vscode.TabInputWebview && t.input.viewType.includes("ipydeskFigure");
+    t.input instanceof vscode.TabInputWebview
+    && (t.input.viewType.includes("ipydeskFigure") || t.input.viewType.includes(VariableEditor.viewType));
   const figureGroups = () =>
     vscode.window.tabGroups.all.filter(g => g.tabs.some(isFigureTab));
   const isFigureColumn = (col: vscode.ViewColumn | undefined) =>
@@ -670,6 +678,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (sessions.get(s.id) !== s) { return; }
     sessions.delete(s.id);
     closeFigurePanels(s);
+    for (const v of varEditors) { if (v.sid === s.id) { v.ended(); } }
     try { fs.rmSync(s.dir, { recursive: true, force: true }); } catch { /* ignore */ }
     if (activeId === s.id) {
       // 直近に使っていた別のセッションをアクティブにする
@@ -1180,6 +1189,7 @@ export function activate(context: vscode.ExtensionContext) {
       const raw = await vscode.workspace.fs.readFile(uri);
       s.ws = JSON.parse(Buffer.from(raw).toString("utf8")) as WsData;
       if (s.id === activeId) { refresh(); }
+      for (const v of varEditors) { if (v.sid === s.id) { v.refresh(); } }
     } catch { /* ignore */ }
   };
   const wsWatcher = vscode.workspace.createFileSystemWatcher(sessionGlob(WORKSPACE_NAME));
@@ -1196,6 +1206,169 @@ export function activate(context: vscode.ExtensionContext) {
   saveWatcher.onDidCreate(handleSaveRequest);
   saveWatcher.onDidChange(handleSaveRequest);
   context.subscriptions.push(saveWatcher);
+
+  // ---- Variable Editor ----
+  // 問い合わせはファイルで行う: py_varreq_<id>.json を書き、Python のスレッドが
+  // py_varres_<id>.json に答える。プロンプト待ち・停止中・計算中のどれでも答えが返る
+  const varEditors: VariableEditor[] = [];
+  let varSeq = 0;
+
+  const queryVar = async (sid: number, q: VarQuery): Promise<any> => {
+    const s = sessions.get(sid);
+    if (!s || !isAlive(s)) { throw new Error("セッションが終了しています"); }
+    const id = `${Date.now().toString(36)}_${(varSeq++).toString(36)}`;
+    const req = path.join(s.dir, `${VAR_REQ_PREFIX}${id}.json`);
+    const res = path.join(s.dir, `${VAR_RES_PREFIX}${id}.json`);
+    const tmp = req + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify({ id, ...q }), "utf8");
+    fs.renameSync(tmp, req);       // 書きかけを読ませない
+    const until = Date.now() + VAR_TIMEOUT_MS;
+    for (let wait = 15; Date.now() < until; wait = Math.min(wait * 1.5, 100)) {
+      await new Promise(r => setTimeout(r, wait));
+      let text: string;
+      try { text = fs.readFileSync(res, "utf8"); } catch { continue; }
+      try {
+        const data = JSON.parse(text);
+        removeQuiet(res);
+        return data;
+      } catch { continue; }       // 置き換えの途中。次の周回で読む
+    }
+    removeQuiet(req);
+    throw new Error("Python から応答がありません（古い ipydesk のセッションか、処理が詰まっています）");
+  };
+
+  /** Variable Editor のボタンから、コード（プロット）をセッションで実行する */
+  const runInSession = (sid: number, code: string) => {
+    const s = sessions.get(sid);
+    if (!s || !isAlive(s)) {
+      vscode.window.showWarningMessage("IPyDesk: セッションが終了しています");
+      return;
+    }
+    // 停止中は pdb がそのフレームで実行する。実行中は入力が溜まるだけなので送らない
+    if (!s.stopped && isBusy(s)) {
+      vscode.window.showWarningMessage(`IPyDesk: ${s.name} は実行中のため、終わってからもう一度押してください`);
+      return;
+    }
+    if (figureDisplay() === "none") {
+      vscode.window.setStatusBarMessage(
+        "IPyDesk: ipydesk.figureDisplay が none のため、図は表示されません", 4000);
+    }
+    s.lastUsed = Date.now();
+    s.terminal.show(true);
+    s.terminal.sendText(code);
+  };
+
+  const openVariable = (expr: string, s: Session | undefined = active()) => {
+    expr = expr.trim();
+    if (!expr) { return; }
+    if (!s) {
+      vscode.window.showInformationMessage(
+        "IPyDesk: セッションがありません。F5 で実行してから開いてください");
+      return;
+    }
+    const open = varEditors.find(v => v.sid === s.id && v.expr === expr);
+    if (open) { open.reveal(); return; }
+    const title = sessions.size > 1 || s.id !== 1 ? `${expr} (${s.name})` : expr;
+    const ed = new VariableEditor(expr, s.id, title, figureColumn(), {
+      query: queryVar,
+      run: runInSession,
+      closed: e => {
+        const i = varEditors.indexOf(e);
+        if (i >= 0) { varEditors.splice(i, 1); }
+      },
+    });
+    varEditors.push(ed);
+  };
+  workspaceView.onOpen = expr => openVariable(expr);
+
+  /** 開く変数を選ぶ。一覧に無い式（sim.state や d['k'] など）も打ち込める */
+  const pickVariable = async () => {
+    const s = active();
+    if (!s) {
+      vscode.window.showInformationMessage(
+        "IPyDesk: セッションがありません。F5 で実行してから開いてください");
+      return;
+    }
+    const vars = (s.ws?.vars ?? []).filter(v => v.open);
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem>();
+    qp.placeholder = "Variable Editor で開く変数（一覧に無い式も入力できます）";
+    const base: vscode.QuickPickItem[] = vars.map(v => ({ label: v.name, description: `${v.size}  ${v.cls}` }));
+    qp.items = base;
+    qp.onDidChangeValue(val => {
+      const t = val.trim();
+      qp.items = t && !base.some(b => b.label === t)
+        ? [{ label: t, description: "式として開く" }, ...base] : base;
+    });
+    qp.onDidAccept(() => {
+      const pick = qp.selectedItems[0]?.label ?? qp.value;
+      qp.hide();
+      openVariable(pick, s);
+    });
+    qp.onDidHide(() => qp.dispose());
+    qp.show();
+  };
+
+  context.subscriptions.push(
+    // 引数: 式の文字列 / ワークスペースビューの右クリック（{ varExpr }）/ 無し（一覧から選ぶ）
+    vscode.commands.registerCommand("ipydesk.openVariable", (arg?: unknown) => {
+      if (typeof arg === "string") { return openVariable(arg); }
+      const x = (arg as { varExpr?: unknown } | undefined)?.varExpr;
+      if (typeof x === "string") { return openVariable(x); }
+      return pickVariable();
+    }),
+  );
+
+  // ---- Open Desk: MATLAB 風の配置 ----
+  //  ┌──────────┬────────────────┬───────────────┐
+  //  │Workspace │ コード          │ Figure /       │
+  //  │（サイド  │                │ Variable Editor │
+  //  │  バー）  ├────────────────┴───────────────┤
+  //  │          │ IPyDesk コンソール（パネル）       │
+  //  └──────────┴────────────────────────────────┘
+  const openDesk = async () => {
+    // コマンドウィンドウにあたるセッションが無ければ、空のセッションを起動する
+    if (sessions.size === 0) {
+      await startSession();
+    }
+    const s = active();
+
+    // 1. エディタ: 左にコード、右に図・変数
+    const desk = [...allFigurePanels().map(f => f.p), ...varEditors.map(v => v.panel)];
+    const figs = s && figuresInTabs() ? readFigures(s) : undefined;
+    const right = figuresInTabs() || desk.length > 0;
+    const code = lastCode ?? (vscode.window.activeTextEditor?.document.languageId === "python"
+      ? { uri: vscode.window.activeTextEditor.document.uri, column: vscode.ViewColumn.One } : undefined);
+    await vscode.commands.executeCommand("vscode.setEditorLayout", right
+      ? { orientation: 0, groups: [{ size: 0.58 }, { size: 0.42 }] }
+      : { orientation: 0, groups: [{}] });
+    if (right) {
+      for (const p of desk) { p.reveal(vscode.ViewColumn.Two, true); }
+    }
+    if (code) {
+      await vscode.window.showTextDocument(code.uri, {
+        viewColumn: vscode.ViewColumn.One, preserveFocus: false, preview: false });
+    }
+    // 閉じていた Figure タブも開き直す（右のグループに入る）
+    if (s && figs && figs.figures.length > 0) {
+      syncFigurePanels(s, figs);
+    }
+
+    // 2. パネル（下）にコンソール
+    try {
+      await vscode.commands.executeCommand("workbench.action.positionPanelBottom");
+    } catch { /* 古い VS Code */ }
+    s?.terminal.show(true);
+
+    // 3. サイドバーに Workspace
+    await vscode.commands.executeCommand("workbench.view.extension.ipydesk");
+
+    // 4. フォーカスはコードへ戻す
+    if (code) {
+      await vscode.window.showTextDocument(code.uri, {
+        viewColumn: vscode.ViewColumn.One, preserveFocus: false, preview: false });
+    }
+  };
+  context.subscriptions.push(vscode.commands.registerCommand("ipydesk.openDesk", openDesk));
 
   // ---- セルの折りたたみ ----
   // インデントによる既定の折りたたみと併存する（VS Code が両方をマージする）

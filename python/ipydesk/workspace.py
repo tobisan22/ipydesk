@@ -146,8 +146,26 @@ def describe(v: Any) -> tuple[str, str, str]:
     return f"<{cls}>", size, cls
 
 
+def _safe_openable(v: Any) -> bool:
+    try:
+        return openable(v)
+    except Exception:
+        return False
+
+
 def _is_shape(s: Any) -> bool:
     return isinstance(s, tuple) and all(isinstance(n, int) for n in s)
+
+
+def openable(v: Any) -> bool:
+    """Variable Editor で表として開けるか（配列・表・list / tuple）"""
+    t = type(v)
+    mod = (t.__module__ or "").split(".")[0]
+    if mod == "numpy":
+        return getattr(v, "ndim", 0) >= 1 and t.__name__ == "ndarray"
+    if mod == "pandas":
+        return t.__name__ in ("DataFrame", "Series")
+    return isinstance(v, (list, tuple)) and len(v) > 0
 
 
 def _safe_describe(v: Any) -> tuple[str, str, str]:
@@ -207,13 +225,18 @@ def snapshot(ns: dict, hidden: dict | set | None = None, scope: str = "base") ->
             elif prev[name] != now[name]:
                 mark = "chg"
         item: dict[str, Any] = {"name": name, "value": value, "size": size, "cls": cls, "mark": mark}
+        if _safe_openable(v):
+            item["open"] = True
         try:
             kids = children(v)
         except Exception:
             kids = None
         if kids:
             item["kids"] = [
-                dict(zip(("name", "value", "size", "cls"), (k, *_safe_describe(x))))
+                {
+                    **dict(zip(("name", "value", "size", "cls"), (k, *_safe_describe(x)))),
+                    **({"open": True} if _safe_openable(x) else {}),
+                }
                 for k, x in kids[0]
             ]
             if kids[1]:

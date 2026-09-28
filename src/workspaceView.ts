@@ -6,6 +6,8 @@
  *  - 実行後 / プロンプトで打った後 : IPython の名前空間（Base）
  *  - ブレークポイントで停止中      : そのフレームのローカル変数
  * このビューは表示だけ。変数の中身を取りに Python へ問い合わせることはしない。
+ * 配列・表をダブルクリック（または右クリック →「Variable Editor で開く」）すると、
+ * Variable Editor で開く（中身の問い合わせは Variable Editor が行う）。
  */
 import * as vscode from "vscode";
 
@@ -17,6 +19,7 @@ export interface WsVar {
   size: string;
   cls: string;
   mark?: "" | "new" | "chg";
+  open?: boolean;          // Variable Editor で開ける（配列・表・list）
   kids?: WsVar[];
   more?: number;
 }
@@ -34,6 +37,8 @@ export class WorkspaceViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private data: WsData | null = null;
   private session?: string;
+  /** 変数を Variable Editor で開く（ダブルクリック） */
+  onOpen?: (expr: string) => void;
 
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
@@ -41,6 +46,7 @@ export class WorkspaceViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = html(view.webview.cspSource);
     view.webview.onDidReceiveMessage(m => {
       if (m?.type === "ready") { this.post(); }
+      if (m?.type === "open" && typeof m.expr === "string") { this.onOpen?.(m.expr); }
     });
     // 非表示の間に来た更新は捨てているので、見えた時点の最新を送り直す
     view.onDidChangeVisibility(() => { if (view.visible) { this.post(); } });
@@ -101,6 +107,8 @@ function html(cspSource: string): string {
   .cls { color: var(--vscode-symbolIcon-classForeground, var(--vscode-charts-blue)); }
   .tw { display: inline-block; width: 12px; cursor: pointer; user-select: none; opacity: .8; }
   .kid td.nm { padding-left: 24px; }
+  .op-ic { opacity: 0; margin-left: 5px; color: var(--vscode-textLink-foreground); cursor: pointer; }
+  tr.row.op:hover .op-ic { opacity: .9; }
   .more td { color: var(--vscode-descriptionForeground); font-style: italic; padding-left: 24px; }
   .badge { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
            margin-left: 5px; vertical-align: middle; }
@@ -129,13 +137,26 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const save = () => vscode.setState({ filter, open: [...open] });
 
-function row(v, kid) {
+/** 展開した子の式: x[0] / d['k'] / obj.attr */
+function kidExpr(parent, k) {
+  if (k.startsWith("[")) { return parent + k; }
+  if (/^[A-Za-z_]\\w*$/.test(k)) { return parent + "." + k; }
+  return parent + "[" + k + "]";
+}
+
+function row(v, kid, parent) {
   const tw = v.kids ? (open.has(v.name) ? "▾" : "▸") : "";
   const mark = v.mark ? '<span class="badge ' + v.mark + '"></span>' : "";
-  const tip = v.name + " = " + v.value + "\\n" + [v.size, v.cls].filter(Boolean).join("  ");
-  return '<tr class="row' + (kid ? " kid" : "") + (!kid && sel === v.name ? " sel" : "")
-    + '" data-n="' + (kid ? "" : esc(v.name)) + '" title="' + esc(tip) + '">'
-    + '<td class="nm mono">' + (kid ? "" : '<span class="tw">' + tw + "</span>") + esc(v.name) + mark + "</td>"
+  const expr = kid ? kidExpr(parent, v.name) : v.name;
+  const tip = v.name + " = " + v.value + "\\n" + [v.size, v.cls].filter(Boolean).join("  ")
+    + (v.open ? "\\n\\nダブルクリックで Variable Editor を開く" : "");
+  const ctx = v.open ? ' data-vscode-context="' + esc(JSON.stringify(
+    { webviewSection: "var", varExpr: expr, preventDefaultContextMenuItems: true })) + '"' : "";
+  const ic = v.open ? '<span class="op-ic" data-open="1" title="Variable Editor で開く">⊞</span>' : "";
+  return '<tr class="row' + (kid ? " kid" : "") + (v.open ? " op" : "") + (!kid && sel === v.name ? " sel" : "")
+    + '" data-n="' + (kid ? "" : esc(v.name)) + '" data-x="' + (v.open ? esc(expr) : "")
+    + '" title="' + esc(tip) + '"' + ctx + '>'
+    + '<td class="nm mono">' + (kid ? "" : '<span class="tw">' + tw + "</span>") + esc(v.name) + mark + ic + "</td>"
     + '<td class="val mono">' + esc(v.value) + "</td>"
     + '<td class="sz mono">' + esc(v.size) + "</td>"
     + '<td class="cls">' + esc(v.cls) + "</td></tr>";
@@ -162,7 +183,7 @@ function render() {
   for (const v of vars) {
     h += row(v, false);
     if (v.kids && open.has(v.name)) {
-      for (const k of v.kids) { h += row(k, true); }
+      for (const k of v.kids) { h += row(k, true, v.name); }
       if (v.more) { h += '<tr class="more"><td colspan="4">… 他 ' + v.more + " 件</td></tr>"; }
     }
   }
@@ -177,7 +198,26 @@ function render() {
 $("filter").addEventListener("input", e => { filter = e.target.value; save(); render(); });
 $("list").addEventListener("click", e => {
   const tr = e.target.closest("tr.row");
-  if (!tr || !tr.dataset.n) { return; }
+  if (!tr) { return; }
+  if (e.target.closest(".op-ic") && tr.dataset.x) {   // ⊞ で開く
+    vscode.postMessage({ type: "open", expr: tr.dataset.x });
+    return;
+  }
+  // ダブルクリック: 配列・表なら Variable Editor で開く。それ以外で子があれば開閉。
+  // 1 回目のクリックで表を描き直すため dblclick イベントは元の行に届かない。detail で判定する
+  if (e.detail === 2 && !e.target.closest(".tw")) {
+    if (tr.dataset.x) {
+      vscode.postMessage({ type: "open", expr: tr.dataset.x });
+      return;
+    }
+    const v = tr.dataset.n && data && data.vars.find(x => x.name === tr.dataset.n);
+    if (v && v.kids) {
+      open.has(v.name) ? open.delete(v.name) : open.add(v.name);
+      save(); render();
+    }
+    return;
+  }
+  if (!tr.dataset.n) { return; }
   const n = tr.dataset.n;
   if (e.target.closest(".tw") && e.target.textContent) {
     open.has(n) ? open.delete(n) : open.add(n);
@@ -185,14 +225,6 @@ $("list").addEventListener("click", e => {
   }
   sel = n;
   render();
-});
-$("list").addEventListener("dblclick", e => {   // 行のダブルクリックでも開閉
-  const tr = e.target.closest("tr.row");
-  if (!tr || !tr.dataset.n || e.target.closest(".tw")) { return; }
-  const v = data && data.vars.find(x => x.name === tr.dataset.n);
-  if (!v || !v.kids) { return; }
-  open.has(v.name) ? open.delete(v.name) : open.add(v.name);
-  save(); render();
 });
 window.addEventListener("message", e => {
   if (e.data && e.data.type === "data") { data = e.data.data; render(); }

@@ -10,6 +10,7 @@ ipydesk.core — VS Code の赤丸（ブレークポイント）で停止しつ�
                       （セル実行 / 選択範囲の実行 / 現在行の実行）
   - %ipydesk / %ipydesk_cell マジック : IPython セッション内から上の 2 つを呼ぶ
   - ワークスペースビュー : セルの終了時と停止時に変数一覧を書き出す（ipydesk.workspace）
+  - Variable Editor   : 拡張からの問い合わせに、変数の一部を表で答える（ipydesk.varview）
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import traceback
 from bdb import BdbQuit
 from pathlib import Path
 
-from . import workspace
+from . import varview, workspace
 
 try:
     from ipdb.__main__ import _get_debugger_cls
@@ -68,6 +69,9 @@ session_file: Path | None = None
 _last_error: tuple | None = None
 error_info: dict | None = None
 
+# ブレークポイント・事後デバッグで停止中のデバッガ（Variable Editor がそのフレームの変数を見る）
+active_debugger = None
+
 
 def out_dir(vscode_dir: Path | None) -> Path | None:
     """拡張へ通知するファイルの書き出し先。セッション専用ディレクトリがあればそちら"""
@@ -92,9 +96,20 @@ def write_session(busy: bool) -> None:
         print(f"[ipydesk] セッション通知の書き出しに失敗: {e}", file=sys.stderr)
 
 
-def notify_figures(vscode_dir: Path | None) -> None:
-    """webagg 稼働中なら、現在の figure 番号一覧を拡張に通知する"""
+_last_figures: list | None = None
+
+
+def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> None:
+    """webagg 稼働中なら、現在の figure 番号一覧を拡張に通知する。
+
+    only_if_changed=True は、プロンプトで打った 1 行や停止中のコマンドの後に使う。
+    一覧が変わっていなければ書かない（書くと拡張が既存の Figure タブを前に出すため）。
+    F5 / セル実行の後は、変わっていなくても書いて図を前に出す。
+    """
+    global _last_figures
     if vscode_dir is None:
+        return
+    if "matplotlib.pyplot" not in sys.modules:  # 図を使っていないセッションで import しない
         return
     try:
         import matplotlib.pyplot as plt
@@ -104,10 +119,17 @@ def notify_figures(vscode_dir: Path | None) -> None:
         return
     if not webagg.url:
         return
-    (vscode_dir / FIGURES_NAME).write_text(
-        json.dumps({"url": webagg.url, "figures": plt.get_fignums()}),
-        encoding="utf-8",
-    )
+    nums = plt.get_fignums()
+    if only_if_changed and nums == _last_figures:
+        return
+    _last_figures = nums
+    try:
+        (vscode_dir / FIGURES_NAME).write_text(
+            json.dumps({"url": webagg.url, "figures": nums}),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        print(f"[ipydesk] figure 一覧の書き出しに失敗: {e}", file=sys.stderr)
 
 
 def find_vscode_dir(start: Path) -> Path | None:
@@ -234,6 +256,7 @@ class VsPdb(Pdb):
     def postcmd(self, stop, line):
         if not stop:  # `x = 3` や `p x` など、停止したまま打ったコマンドの後
             self._write_workspace()
+            notify_figures(self.out_dir, only_if_changed=True)  # 停止中に描いた図もタブに出す
         return super().postcmd(stop, line)
 
     # u / d でフレームを移ったら、そのフレームの変数に切り替える
@@ -252,10 +275,13 @@ class VsPdb(Pdb):
 
     # --- 停止位置の通知（拡張側がハイライトに使う） ---------------------------
     def interaction(self, frame, tb_or_exc):
+        global active_debugger
         self._write_state(frame)
+        prev, active_debugger = active_debugger, self
         try:
             super().interaction(frame, tb_or_exc)
         finally:
+            active_debugger = prev
             self._clear_state()
 
     def _write_state(self, frame):
@@ -505,8 +531,10 @@ def load_ipython_extension(ip):
     def mark_idle(*_):
         write_session(False)
         update_workspace()
+        notify_figures(vsdir, only_if_changed=True)  # プロンプトで描いた図もタブに出す
 
     # F5 / セル実行（%ipydesk・%ipydesk_cell もセルの 1 つ）/ プロンプトで打った 1 行、すべての前後
     ip.events.register("pre_run_cell", mark_busy)
     ip.events.register("post_run_cell", mark_idle)
     update_workspace()  # 起動直後の空の一覧（拡張が「セッションあり」と分かるように）
+    varview.start(vsdir, ip)  # Variable Editor の問い合わせに答えるスレッド
