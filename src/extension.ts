@@ -42,6 +42,7 @@ const SESSION_NAME = "py_session.json";
 const FIGURES_NAME = "py_figures.json";
 const SAVE_REQUEST_NAME = "py_save_request.json";   // Python → 拡張 : 保存ダイアログ要求
 const SESSIONS_DIR = "py_sessions";                 // .vscode/py_sessions/<番号>/ にセッション別の通知
+const FIG_CLOSE_PREFIX = "py_figclose_";            // 拡張 → Python : 利用者が閉じた Figure タブ
 const VAR_REQ_PREFIX = "py_varreq_";                // 拡張 → Python : Variable Editor の問い合わせ
 const VAR_RES_PREFIX = "py_varres_";                // Python → 拡張 : その答え
 const VAR_TIMEOUT_MS = 5000;
@@ -190,6 +191,7 @@ export function activate(context: vscode.ExtensionContext) {
     figInfo?: FigureInfo;                          // 最後に読んだ py_figures.json
     histCut: Map<number, number>;                  // 「履歴を消す」を押した時点の seq（これ以前は出さない）
     figIds: Map<number, string>;                   // タブが繋がっている figure の実体（py_figures.json の ids）
+    closedIds: Set<string>;                        // タブを閉じた figure の実体（Python が閉じるまで開き直さない）
     ws: WsData | null;                             // 最後に受け取った変数一覧
     error?: ErrInfo;                               // 直前の実行のエラー（次の実行で消える）
     lastUsed: number;
@@ -364,9 +366,31 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   // ---- figure タブ ----
+  // 拡張が自分で閉じたタブ（plt.close された・セッション終了）。利用者が閉じたタブと区別する
+  const closingByExt = new WeakSet<vscode.WebviewPanel>();
+  const disposeByExt = (p: vscode.WebviewPanel) => { closingByExt.add(p); p.dispose(); };
   const closeFigurePanels = (s: Session) => {
-    for (const p of [...s.figures.values()]) { p.dispose(); }
+    for (const p of [...s.figures.values()]) { disposeByExt(p); }
     s.figures.clear();
+  };
+
+  /**
+   * 利用者が Figure タブを閉じたら、その figure を Python 側でも閉じてもらう（MATLAB と同じ）。
+   * 閉じないと figure が残り、次の通知でタブが開き直され、plt.plot もその図へ描き足してしまう。
+   * Python は次のコマンドを実行する直前に py_figclose_*.json を読んで plt.close する
+   */
+  const requestFigureClose = (s: Session, num: number, id: string | undefined) => {
+    if (sessions.get(s.id) !== s || !isAlive(s)) { return; }
+    if (id) { s.closedIds.add(id); }
+    try {
+      const req = path.join(s.dir,
+        `${FIG_CLOSE_PREFIX}${Date.now().toString(36)}_${num}.json`);
+      fs.writeFileSync(req + ".tmp", JSON.stringify({ num, id: id ?? null }), "utf8");
+      fs.renameSync(req + ".tmp", req);   // 書きかけを読ませない
+      extLog(`FIG   Figure ${num} のタブが閉じられたので close を要求`);
+    } catch (e) {
+      extLog(`FIG   close 要求の書き出しに失敗: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
   const allFigurePanels = () =>
     [...sessions.values()].flatMap(s => [...s.figures].map(([num, p]) => ({ s, num, p })));
@@ -536,6 +560,10 @@ export function activate(context: vscode.ExtensionContext) {
     const id0 = s.figInfo?.ids?.[String(num)];
     if (id0) { s.figIds.set(num, id0); }   // 開いた時点の figure に繋がっている
     panel.onDidDispose(() => {
+      if (!closingByExt.has(panel) && s.figures.get(num) === panel) {
+        requestFigureClose(s, num, s.figIds.get(num) ?? s.figInfo?.ids?.[String(num)]);
+        s.histCut.delete(num);
+      }
       if (s.figures.get(num) === panel) { s.figures.delete(num); s.figIds.delete(num); }
       if (activeFigure?.sid === s.id && activeFigure.num === num) { activeFigure = undefined; }
       updateFigureContext();
@@ -596,9 +624,17 @@ export function activate(context: vscode.ExtensionContext) {
 
   const syncFigurePanels = (s: Session, info: FigureInfo) => {
     s.figInfo = info;
-    for (const n of info.figures) { openFigurePanel(s, info.url, n); }
+    for (const n of info.figures) {
+      // タブを閉じたが Python がまだ閉じていない figure は開き直さない
+      const id = info.ids?.[String(n)];
+      if (id && s.closedIds.has(id)) { continue; }
+      openFigurePanel(s, info.url, n);
+    }
+    // Python が閉じ終えた figure は、閉じた印を消す（id は別の figure に使い回されうる）
+    const alive = new Set(Object.values(info.ids ?? {}));
+    for (const id of [...s.closedIds]) { if (!alive.has(id)) { s.closedIds.delete(id); } }
     for (const [n, p] of [...s.figures]) {         // plt.close された figure のタブは閉じる
-      if (!info.figures.includes(n)) { p.dispose(); }
+      if (!info.figures.includes(n)) { disposeByExt(p); }
     }
     updateFigureHistory(s);
   };
@@ -861,7 +897,7 @@ export function activate(context: vscode.ExtensionContext) {
       name, shellPath: probe.exe, shellArgs: args, env, isTransient: true,
     });
     const s: Session = {
-      id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), ws: null,
+      id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), closedIds: new Set(), ws: null,
       lastUsed: Date.now(),
     };
     sessions.set(sid, s);

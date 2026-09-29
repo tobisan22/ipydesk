@@ -55,6 +55,7 @@ SKIP = [
 ]
 
 FIGURES_NAME = "py_figures.json"  # Python → 拡張 : figure 表示ページの URL
+FIG_CLOSE_PREFIX = "py_figclose_"  # 拡張 → Python : 利用者が閉じた Figure タブ（1 要求 1 ファイル）
 
 # セッションの出力先（python -m ipydesk が起動時に決める）。
 # 停止位置・figure 一覧・変数一覧・保存要求をここへ書く。VS Code 拡張から起動した場合は
@@ -100,6 +101,48 @@ def write_session(busy: bool) -> None:
 _last_figures: str | None = None
 
 
+def apply_figure_closes(vscode_dir: Path | None) -> None:
+    """Figure タブを閉じた figure を plt.close する（MATLAB で図のウィンドウを閉じるのと同じ）。
+
+    タブを閉じても figure は Python に残るため、放っておくと次に一覧を通知したとき
+    タブが開き直され、plt.plot も閉じたはずの図に描き足してしまう。
+    拡張は閉じたタブごとに py_figclose_*.json（{"num", "id"}）を書くので、
+    次のコマンドを実行する直前（とプロンプトへ戻る前）にまとめて閉じる。
+    id が違う＝その番号で既に作り直された figure は閉じない。
+    閉じた図は Figure の履歴からも消す（同じ番号で作った新しい図の履歴に混ざらないように）。
+    """
+    if vscode_dir is None:
+        return
+    try:
+        reqs = sorted(vscode_dir.glob(FIG_CLOSE_PREFIX + "*.json"))
+    except OSError:
+        return
+    if not reqs:
+        return
+    targets: list[tuple[int, str | None]] = []
+    for f in reqs:
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+            targets.append((int(r["num"]), r.get("id")))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    if "matplotlib.pyplot" not in sys.modules:
+        return
+    import matplotlib.pyplot as plt
+    from matplotlib._pylab_helpers import Gcf
+
+    for num, fid in targets:
+        m = Gcf.figs.get(num)
+        if m is None or (fid and f"{id(m):x}" != fid):
+            continue
+        plt.close(m.canvas.figure)
+        fighist.forget(num, vscode_dir)
+
+
 def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> None:
     """webagg 稼働中なら、現在の figure 番号一覧と履歴を拡張に通知する。
 
@@ -111,6 +154,7 @@ def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> No
     global _last_figures
     if vscode_dir is None:
         return
+    apply_figure_closes(vscode_dir)  # 閉じられたタブの figure を一覧に載せない
     if "matplotlib.pyplot" not in sys.modules:  # 図を使っていないセッションで import しない
         return
     try:
@@ -223,6 +267,7 @@ class VsPdb(Pdb):
 
     def precmd(self, line: str) -> str:
         self.sync_breakpoints()  # c / n / s 等の直前に最新の赤丸へ揃える
+        apply_figure_closes(self.out_dir)  # 停止中に閉じたタブの図へ描き足さない
         return super().precmd(line)
 
     # reset / user_return / interaction / _write_state / _clear_state は変更なし
@@ -552,6 +597,7 @@ def load_ipython_extension(ip):
 
     def mark_busy(info=None, *_):
         write_session(True)
+        apply_figure_closes(vsdir)  # 閉じたタブの図へ plt.plot が描き足さないよう、実行前に閉じる
         raw = getattr(info, "raw_cell", None)
         if raw:  # プロンプトで打った行。%ipydesk なら実行側がスクリプト名で上書きする
             fighist.set_label(raw.strip().splitlines()[0] if raw.strip() else "")

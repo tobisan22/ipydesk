@@ -149,6 +149,17 @@ def payload(nums: list[int]) -> dict:
     }
 
 
+def forget(num: int, folder: Path | None = None) -> None:
+    """figure を閉じたとき（Figure タブを閉じた）に、その番号の今の姿と履歴を捨てる"""
+    _current.pop(num, None)
+    for h in _history.pop(num, []):
+        if folder is not None:
+            try:
+                (folder / h["file"]).unlink()
+            except OSError:
+                pass
+
+
 def reset() -> None:
     """テスト用"""
     global _seq, label

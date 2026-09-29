@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - Windows で conda の MKL 版 numpy / scipy を使っていると、実行中に Ctrl+C を押したときに `forrtl: error (200)` でセッション（ターミナル）ごと終了していた問題を修正しました。Intel Fortran ランタイムの Ctrl+C ハンドラを無効にし（`FOR_DISABLE_CONSOLE_CTRL_HANDLER=1`）、実行中のコマンドだけが `KeyboardInterrupt` で止まるようにしました。
+- タブを閉じたときにipyセッション中ではfigureが残る挙動を修正。タブを閉じる動作でセッションからfigure及び履歴を削除するようにしました。
 
 ## [0.0.4] - 2026-09-29
 
