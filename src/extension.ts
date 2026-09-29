@@ -642,8 +642,13 @@ export function activate(context: vscode.ExtensionContext) {
   //  PYTHONPATH : 同梱した ipydesk を pip install 無しで import できるようにする
   //  IPYDESK_SESSION_DIR : このセッションの通知ファイルの置き場所（セッションごとに別）
   //  IPYDESK_FIG_HISTORY : Figure タブに残す履歴の枚数（ipydesk.figureHistory）
+  //  FOR_DISABLE_CONSOLE_CTRL_HANDLER : Intel Fortran ランタイム（conda の MKL 版
+  //               numpy / scipy が読み込む libifcoremd.dll）が独自の Ctrl+C ハンドラを
+  //               入れないようにする。入ると Ctrl+C で "forrtl: error (200)" を出して
+  //               プロセスごと終了し、実行中のコマンドだけを止められない
   const sessionEnv = (id = 1, dir?: string): { [k: string]: string } => {
     const env: { [k: string]: string } = {
+      FOR_DISABLE_CONSOLE_CTRL_HANDLER: "1",
       IPYDESK_PORT: String(config().get<number>("webaggPort", 8988) + id - 1),
       IPYDESK_FIG_HISTORY: String(Math.max(0, Math.floor(config().get<number>("figureHistory", 20)))),
       ...(dir ? { IPYDESK_SESSION_DIR: dir } : {}),

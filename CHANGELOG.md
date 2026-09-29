@@ -4,6 +4,12 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.5] - 2026-09-29
+
+### Fixed
+
+- Windows で conda の MKL 版 numpy / scipy を使っていると、実行中に Ctrl+C を押したときに `forrtl: error (200)` でセッション（ターミナル）ごと終了していた問題を修正しました。Intel Fortran ランタイムの Ctrl+C ハンドラを無効にし（`FOR_DISABLE_CONSOLE_CTRL_HANDLER=1`）、実行中のコマンドだけが `KeyboardInterrupt` で止まるようにしました。
+
 ## [0.0.4] - 2026-09-29
 
 ### Added

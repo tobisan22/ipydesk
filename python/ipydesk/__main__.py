@@ -27,6 +27,13 @@ import os
 import sys
 from pathlib import Path
 
+# Intel Fortran ランタイム（conda の MKL 版 numpy / scipy）は、読み込まれた時点で
+# 独自の Ctrl+C ハンドラを入れ、Ctrl+C を受けると "forrtl: error (200)" でプロセスごと
+# 終了させる。これだとセッション全体が落ち、実行中のコマンドだけを止められない。
+# DLL が読み込まれる前（numpy / scipy を import する前）に無効化しておく。
+# VS Code 拡張からは環境変数でも渡しているが、ターミナルから直接起動した場合に備える。
+os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
+
 from IPython import start_ipython
 from traitlets.config import Config
 
