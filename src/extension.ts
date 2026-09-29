@@ -7,6 +7,7 @@
  *  - Python 側が書く .vscode/py_debug_state.json を監視して停止行をハイライト
  *  - 停止中は F5/F10/F11 などを pdb コマンドとしてターミナルへ送る
  *  - Python 側が書く .vscode/py_figures.json を監視して figure ごとにタブを開く
+ *    （描き直した図の前の姿は、同じタブの上側に履歴として積み上がる）
  *  - Figure タブの 📋 で、その figure の PNG を Windows のクリップボードへ入れる
  *  - Python 側が書く .vscode/py_workspace.json を監視してワークスペースビューに変数を出す
  *  - Variable Editor: 配列・表を表形式で開き、選択範囲をプロットする（py_varreq_* で問い合わせ）
@@ -33,6 +34,7 @@ import * as http from "http";
 import { execFile } from "child_process";
 import { WORKSPACE_NAME, WorkspaceViewProvider, WsData } from "./workspaceView";
 import { VariableEditor, VarQuery } from "./variableEditor";
+import { FigureInfo, figureHtml } from "./figurePanel";
 
 const BP_NAME = "py_breakpoints.json";
 const STATE_NAME = "py_debug_state.json";
@@ -185,6 +187,9 @@ export function activate(context: vscode.ExtensionContext) {
     terminal: vscode.Terminal;
     stopped?: Stop;                                // ブレークポイントで停止中の位置
     figures: Map<number, vscode.WebviewPanel>;     // figure 番号 → タブ
+    figInfo?: FigureInfo;                          // 最後に読んだ py_figures.json
+    histCut: Map<number, number>;                  // 「履歴を消す」を押した時点の seq（これ以前は出さない）
+    figIds: Map<number, string>;                   // タブが繋がっている figure の実体（py_figures.json の ids）
     ws: WsData | null;                             // 最後に受け取った変数一覧
     error?: ErrInfo;                               // 直前の実行のエラー（次の実行で消える）
     lastUsed: number;
@@ -451,27 +456,73 @@ export function activate(context: vscode.ExtensionContext) {
     });
   };
 
+  /** タブの見出し。plt.figure("名前") の名前と、2 つ目以降のセッションならセッション名を添える */
+  const figureTitle = (s: Session, num: number) => {
+    const label = s.figInfo?.labels?.[String(num)];
+    return `Figure ${num}${label ? `: ${label}` : ""}${s.id === 1 ? "" : ` (${s.name})`}`;
+  };
+
+  /** Figure タブへ履歴（描き直す前の姿）を送る */
+  const postFigureHistory = (s: Session, num: number) => {
+    const panel = s.figures.get(num);
+    const info = s.figInfo;
+    if (!panel || !info) { return; }
+    const cut = s.histCut.get(num) ?? 0;
+    const items = (info.history?.[String(num)] ?? []).filter(h => h.seq > cut).map(h => ({
+      ...h, src: panel.webview.asWebviewUri(vscode.Uri.file(path.join(s.dir, h.file))).toString(),
+    }));
+    void panel.webview.postMessage({
+      type: "history", items, current: items.length ? info.current?.[String(num)] : undefined,
+    });
+    const title = figureTitle(s, num);
+    if (panel.title !== title) { panel.title = title; }
+    // plt.close("all") などで同じ番号の figure が作り直されたら、タブを新しい figure に繋ぎ直す
+    const id = info.ids?.[String(num)];
+    const prev = s.figIds.get(num);
+    if (id && prev && id !== prev) {
+      extLog(`FIG   Figure ${num} が作り直されたのでタブを読み直す`);
+      void panel.webview.postMessage({ type: "reload" });
+    }
+    if (id) { s.figIds.set(num, id); }
+  };
+
   const openFigurePanel = (s: Session, base: string, num: number) => {
     markFigureOpened();
     const existing = s.figures.get(num);
     if (existing) { existing.reveal(undefined, true); return; }
 
-    // 2 つ目以降のセッションの図は、どのセッションのものか分かるよう名前を添える
     const panel = vscode.window.createWebviewPanel(
-      "ipydeskFigure", s.id === 1 ? `Figure ${num}` : `Figure ${num} (${s.name})`,
+      "ipydeskFigure", figureTitle(s, num),
       { viewColumn: figureColumn(), preserveFocus: true },
-      { enableScripts: true, retainContextWhenHidden: true }
+      {
+        enableScripts: true, retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.file(s.dir)],   // 履歴の PNG
+      }
     );
-    const figureHtml = () => `<!DOCTYPE html><html><head>
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; frame-src ${base}; style-src 'unsafe-inline';">
-<style>
-  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
-  iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
-</style>
-</head><body><iframe src="${base}/${num}"></iframe>
-<!-- ${Date.now()}-${Math.random().toString(36).slice(2)} --></body></html>`;
-    panel.webview.html = figureHtml();
+    panel.webview.html = figureHtml(base, num, panel.webview.cspSource);
+    panel.webview.onDidReceiveMessage(async m => {
+      if (m?.type === "ready") {
+        postFigureHistory(s, num);
+      } else if (m?.type === "clearHistory") {
+        const items = s.figInfo?.history?.[String(num)] ?? [];
+        s.histCut.set(num, Math.max(0, ...items.map(h => h.seq)));
+        postFigureHistory(s, num);
+      } else if (m?.type === "copyImage" && typeof m.file === "string") {
+        // 履歴の画像をコピーする。fighist/ の中のファイルだけを受け付ける
+        const file = path.resolve(s.dir, m.file);
+        if (!file.startsWith(path.join(s.dir, "fighist") + path.sep) || process.platform !== "win32") {
+          vscode.window.showWarningMessage("IPyDesk: 画像のクリップボードコピーは Windows のみ対応です");
+          return;
+        }
+        try {
+          await setClipboardImage(file);
+          vscode.window.setStatusBarMessage("IPyDesk: 履歴の図をコピーしました", 2000);
+        } catch (e) {
+          vscode.window.showErrorMessage(
+            `IPyDesk: コピーに失敗しました — ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    });
 
     // 背面タブが空白になる問題は Python 側（ipydesk.webagg）で対処している。
     // ブラウザは canvas のリサイズで中身を捨てるため、resize には必ずフル画像を返す。
@@ -482,18 +533,22 @@ export function activate(context: vscode.ExtensionContext) {
       }
       updateFigureContext();
     });
+    const id0 = s.figInfo?.ids?.[String(num)];
+    if (id0) { s.figIds.set(num, id0); }   // 開いた時点の figure に繋がっている
     panel.onDidDispose(() => {
-      if (s.figures.get(num) === panel) { s.figures.delete(num); }
+      if (s.figures.get(num) === panel) { s.figures.delete(num); s.figIds.delete(num); }
       if (activeFigure?.sid === s.id && activeFigure.num === num) { activeFigure = undefined; }
       updateFigureContext();
     });
     s.figures.set(num, panel);
   };
 
-  const readFigures = (s: Session | undefined): { url: string; figures: number[] } | undefined => {
+  const readFigures = (s: Session | undefined): FigureInfo | undefined => {
     if (!s) { return undefined; }
     try {
-      return JSON.parse(fs.readFileSync(path.join(s.dir, FIGURES_NAME), "utf8"));
+      const info = JSON.parse(fs.readFileSync(path.join(s.dir, FIGURES_NAME), "utf8")) as FigureInfo;
+      s.figInfo = info;
+      return info;
     } catch {
       return undefined;
     }
@@ -539,11 +594,18 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const syncFigurePanels = (s: Session, info: { url: string; figures: number[] }) => {
+  const syncFigurePanels = (s: Session, info: FigureInfo) => {
+    s.figInfo = info;
     for (const n of info.figures) { openFigurePanel(s, info.url, n); }
     for (const [n, p] of [...s.figures]) {         // plt.close された figure のタブは閉じる
       if (!info.figures.includes(n)) { p.dispose(); }
     }
+    updateFigureHistory(s);
+  };
+
+  /** 開いている Figure タブの履歴と見出しだけを更新する（タブは開かない・前に出さない） */
+  const updateFigureHistory = (s: Session) => {
+    for (const n of s.figures.keys()) { postFigureHistory(s, n); }
   };
 
   // ---- セッション ----
@@ -579,9 +641,11 @@ export function activate(context: vscode.ExtensionContext) {
   //               "auto" は Python 側が Qt → Tk → webagg の順に解決する
   //  PYTHONPATH : 同梱した ipydesk を pip install 無しで import できるようにする
   //  IPYDESK_SESSION_DIR : このセッションの通知ファイルの置き場所（セッションごとに別）
+  //  IPYDESK_FIG_HISTORY : Figure タブに残す履歴の枚数（ipydesk.figureHistory）
   const sessionEnv = (id = 1, dir?: string): { [k: string]: string } => {
     const env: { [k: string]: string } = {
       IPYDESK_PORT: String(config().get<number>("webaggPort", 8988) + id - 1),
+      IPYDESK_FIG_HISTORY: String(Math.max(0, Math.floor(config().get<number>("figureHistory", 20)))),
       ...(dir ? { IPYDESK_SESSION_DIR: dir } : {}),
       IPYDESK_MPL: {
         tab: "webagg",
@@ -792,7 +856,8 @@ export function activate(context: vscode.ExtensionContext) {
       name, shellPath: probe.exe, shellArgs: args, env, isTransient: true,
     });
     const s: Session = {
-      id: sid, name, dir: sdir, terminal, figures: new Map(), ws: null, lastUsed: Date.now(),
+      id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), ws: null,
+      lastUsed: Date.now(),
     };
     sessions.set(sid, s);
     activeId = sid;
@@ -1168,10 +1233,14 @@ export function activate(context: vscode.ExtensionContext) {
 
   // ---- figure タブの自動オープン ----
   const onFigures = async (uri: vscode.Uri) => {
-    if (figureDisplay() !== "tab") { return; }
     const s = byUri(uri);
     const info = readFigures(s);
-    if (s && info) { syncFigurePanels(s, info); }
+    if (!s || !info) { return; }
+    if (figureDisplay() === "tab") {
+      syncFigurePanels(s, info);
+    } else {
+      updateFigureHistory(s);   // manual: 自動では開かないが、開いているタブの履歴は更新する
+    }
   };
   const figWatcher = vscode.workspace.createFileSystemWatcher(sessionGlob(FIGURES_NAME));
   figWatcher.onDidCreate(onFigures);

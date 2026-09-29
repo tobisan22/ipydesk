@@ -68,6 +68,12 @@ y.max()
 ## 図の表示
 
 figure ごとに VS Code のタブが開きます。📋 か Ctrl+C でコピー、💾 で png / svg / pdf に保存できます。
+
+**同じ figure を描き直すと、前の図がタブの上側に残ります。** F5 のたびに `plt.figure(1); plt.clf()` して描くスクリプトでも、
+上へスクロールすれば前回・前々回の図と見比べられます（いちばん下が今の図）。
+履歴の図は 📋 で画像としてコピーでき、「履歴を消す」でタブから消せます。
+残す枚数は `ipydesk.figureHistory`（既定 20、0 で無効）で変えられます。
+`plt.figure()` のように毎回新しい番号で作る場合は、これまでどおり別のタブになります。
 表示のしかたは `ipydesk.figureDisplay` で切り替えられます。
 
 ## Variable Editor
@@ -78,6 +84,7 @@ Workspace ビューで配列・DataFrame・Series・list を**ダブルクリッ
 - 100 万行の配列でも、見えている範囲だけを読むので軽く動きます。実行・ステップのたびに最新の値へ更新されます
 - ドラッグ・Shift+クリック・行／列見出しのクリックで範囲を選び、**📈 Plot / X–Y / Scatter / Hist / Image** を押すと図が出ます
   - 実行されるのは `plt.plot(x[2:7, 1:3])` のような 1 行のコードで、ターミナルの履歴に残ります（ボタンにマウスを乗せると事前に確認できます）
+  - 図は変数ごとに 1 枚（`plt.figure("x")`）に描き直します。前に描いた図はそのタブの上側に残るので、スクロールして見比べられます
   - 何も選んでいなければ全体が対象です。3 次元以上の配列は上部の `[:, :, k]` で面を切り替えます
 - **Ctrl+C**（または Copy）で選択範囲をタブ区切りでコピー。Excel にそのまま貼れます（数値は丸めずに出ます）
 - ブレークポイントで停止中は、そのフレームの変数を表示・プロットします
@@ -106,6 +113,7 @@ Workspace を右側に置きたい場合は、ビューをセカンダリ サイ
 | `ipydesk.figureDisplay` | `tab` | 図の表示先: `tab` / `manual`（自動で開かない）/ `window`（別ウィンドウ）/ `none` |
 | `ipydesk.windowBackend` | `auto` | `window` のときのバックエンド: `auto` / `qt` / `tk` |
 | `ipydesk.webaggPort` | `8988` | 図の表示に使うポート |
+| `ipydesk.figureHistory` | `20` | 描き直した図を Figure タブに残す枚数（figure ごと。0 で無効） |
 | `ipydesk.showCellDecorations` | `true` | `# %%` の区切り線とセルの強調を表示する |
 | `ipydesk.useBundledPython` | `true` | 同梱の `ipydesk` を使う（通常は変更不要） |
 

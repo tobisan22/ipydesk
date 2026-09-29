@@ -4,6 +4,21 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.4] - 2026-09-29
+
+### Added
+
+- **Figure の履歴**: 同じ figure を描き直すと、前の図が Figure タブの上側に積み上がります（いちばん下が今の図。上へスクロールで遡る）。F5・セル実行・プロンプトの 1 行・ステップ実行の区切りごとに、見た目が変わった figure だけを記録します。履歴の図は 📋 でコピー、「履歴を消す」で非表示にできます。設定 `ipydesk.figureHistory`（既定 20、0 で無効）。
+  - `plt.figure("名前")` の名前をタブの見出しに出すようにしました（例: `Figure 3: x`）
+
+### Changed
+
+- Variable Editor のプロットは、押すたびに新しい figure を作るのをやめ、変数ごとに 1 枚（`plt.figure("x")`）に描き直すようにしました。前の図は Figure の履歴に残ります。
+
+### Fixed
+
+- スクリプトの先頭で `plt.close("all")` してから同じ番号の figure を作り直すと（`plt.subplots(num=0)` など）、Figure タブが閉じた古い figure に繋がったままで、F5 しても図が更新されなかった問題を修正しました。作り直しを検出してタブを繋ぎ直します。
+
 ## [0.0.3] - 2026-09-28
 
 ### Added

@@ -11,6 +11,7 @@ ipydesk.core — VS Code の赤丸（ブレークポイント）で停止しつ�
   - %ipydesk / %ipydesk_cell マジック : IPython セッション内から上の 2 つを呼ぶ
   - ワークスペースビュー : セルの終了時と停止時に変数一覧を書き出す（ipydesk.workspace）
   - Variable Editor   : 拡張からの問い合わせに、変数の一部を表で答える（ipydesk.varview）
+  - Figure の履歴     : 描き直した図の前の姿を画像で残す（ipydesk.fighist）
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import traceback
 from bdb import BdbQuit
 from pathlib import Path
 
-from . import varview, workspace
+from . import fighist, varview, workspace
 
 try:
     from ipdb.__main__ import _get_debugger_cls
@@ -96,14 +97,15 @@ def write_session(busy: bool) -> None:
         print(f"[ipydesk] セッション通知の書き出しに失敗: {e}", file=sys.stderr)
 
 
-_last_figures: list | None = None
+_last_figures: str | None = None
 
 
 def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> None:
-    """webagg 稼働中なら、現在の figure 番号一覧を拡張に通知する。
+    """webagg 稼働中なら、現在の figure 番号一覧と履歴を拡張に通知する。
 
+    先に Figure の履歴を記録する（描き直された図の前の姿を画像で残す）。
     only_if_changed=True は、プロンプトで打った 1 行や停止中のコマンドの後に使う。
-    一覧が変わっていなければ書かない（書くと拡張が既存の Figure タブを前に出すため）。
+    一覧も履歴も変わっていなければ書かない（書くと拡張が既存の Figure タブを前に出すため）。
     F5 / セル実行の後は、変わっていなくても書いて図を前に出す。
     """
     global _last_figures
@@ -119,15 +121,31 @@ def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> No
         return
     if not webagg.url:
         return
+    fighist.capture(vscode_dir)
     nums = plt.get_fignums()
-    if only_if_changed and nums == _last_figures:
+    from matplotlib._pylab_helpers import Gcf
+
+    labels = {}  # plt.figure("名前") の名前（タブの見出しに出す）
+    # figure の実体の識別子。plt.close してから同じ番号で作り直すと変わる。
+    # タブ（webagg のページ）は古い figure に繋がったままなので、拡張はこれを見て繋ぎ直す
+    ids = {}
+    for n in nums:
+        m = Gcf.figs.get(n)
+        lab = m.canvas.figure.get_label() if m is not None else ""
+        if lab:
+            labels[str(n)] = lab
+        if m is not None:
+            ids[str(n)] = f"{id(m):x}"
+    data = json.dumps(
+        {"url": webagg.url, "figures": nums, "labels": labels, "ids": ids,
+         **fighist.payload(nums)},
+        ensure_ascii=False,
+    )
+    if only_if_changed and data == _last_figures:
         return
-    _last_figures = nums
+    _last_figures = data
     try:
-        (vscode_dir / FIGURES_NAME).write_text(
-            json.dumps({"url": webagg.url, "figures": nums}),
-            encoding="utf-8",
-        )
+        (vscode_dir / FIGURES_NAME).write_text(data, encoding="utf-8")
     except OSError as e:
         print(f"[ipydesk] figure 一覧の書き出しに失敗: {e}", file=sys.stderr)
 
@@ -251,11 +269,16 @@ class VsPdb(Pdb):
 
     def preloop(self):
         self._write_workspace()  # 停止するたび（ステップごと・事後デバッグ）
+        frame = getattr(self, "curframe", None)
+        if frame is not None:  # ステップで描き直した図も履歴に残す
+            fighist.set_label(f"⏸ {Path(frame.f_code.co_filename).name}:{frame.f_lineno}")
+            notify_figures(self.out_dir, only_if_changed=True)
         super().preloop()
 
     def postcmd(self, stop, line):
         if not stop:  # `x = 3` や `p x` など、停止したまま打ったコマンドの後
             self._write_workspace()
+            fighist.set_label(f"ipdb> {line}")
             notify_figures(self.out_dir, only_if_changed=True)  # 停止中に描いた図もタブに出す
         return super().postcmd(stop, line)
 
@@ -404,6 +427,7 @@ def run_script(script: Path, ns: dict, post_mortem: bool = False) -> None:
     ns["__file__"] = str(script)
     ns.setdefault("__name__", "__main__")
     code = compile(script.read_text(encoding="utf-8"), str(script), "exec")
+    fighist.set_label(script.name)
 
     _execute(script, vsdir, lambda: exec(code, ns), post_mortem)
 
@@ -470,6 +494,7 @@ def run_cell(
         if tail is not None:
             sys.displayhook(eval(tail, ns))  # 末尾の式は Out[n] として表示
 
+    fighist.set_label(f"{script.name}:{start}-{end}")
     _execute(script, find_vscode_dir(script.parent), run, post_mortem)
 
 
@@ -525,8 +550,11 @@ def load_ipython_extension(ip):
     def update_workspace(*_):
         workspace.write(vsdir, ip.user_ns, hidden=ip.user_ns_hidden)
 
-    def mark_busy(*_):
+    def mark_busy(info=None, *_):
         write_session(True)
+        raw = getattr(info, "raw_cell", None)
+        if raw:  # プロンプトで打った行。%ipydesk なら実行側がスクリプト名で上書きする
+            fighist.set_label(raw.strip().splitlines()[0] if raw.strip() else "")
 
     def mark_idle(*_):
         write_session(False)

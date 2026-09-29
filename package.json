@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "bisan",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -124,6 +124,12 @@
           ],
           "default": "auto",
           "description": "ipydesk.figureDisplay が window のときに使う matplotlib バックエンド"
+        },
+        "ipydesk.figureHistory": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "description": "同じ figure を描き直したとき、前の図を Figure タブの上側に残す枚数（figure ごと）。0 で残さない。変更は新しいセッションから有効"
         },
         "ipydesk.showCellDecorations": {
           "type": "boolean",

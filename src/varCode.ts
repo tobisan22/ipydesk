@@ -58,7 +58,8 @@ export function selectionExpr(
 /**
  * 選択範囲をプロットする 1 行のコード。その種類のプロットができない選択なら null。
  * コードはセッションのターミナルへそのまま送る（MATLAB と同じく履歴に残り、再利用できる）。
- * ブレークポイントで停止中でも動くよう、plt の import から始める
+ * ブレークポイントで停止中でも動くよう、plt の import から始める。
+ * 図は変数ごとに 1 つ（plt.figure("x")）に描き直す。前の図は Figure タブの履歴に残る
  */
 export function plotCode(
   kind: PlotKind, expr: string, info: VarInfo, sel: Sel, page: number[]): string | null {
@@ -69,7 +70,7 @@ export function plotCode(
   const table2d = k === "dataframe" || (k === "ndarray" && info.shape.length >= 2);
   if (!info.numeric || nr < 1 || nc < 1 || k === "scalar") { return null; }
   const S = (keep2d: boolean, s: Sel = sel) => selectionExpr(expr, info, s, page, keep2d);
-  const head = "import matplotlib.pyplot as plt; plt.figure(); ";
+  const head = "import matplotlib.pyplot as plt; plt.figure(" + JSON.stringify(expr.trim()) + "); plt.clf(); ";
   const col = (c: number, c1 = c + 1) => ({ r0: sel.r0, r1: sel.r1, c0: c, c1 });
   switch (kind) {
     case "line":
