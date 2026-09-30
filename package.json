@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "bisan",
   "license": "MIT",
   "icon": "media/icon.png",

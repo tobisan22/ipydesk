@@ -97,3 +97,68 @@ def test_payload_only_for_live_figures(tmp_path):
     p = fighist.payload([1])
     assert len(p["history"]["1"]) == 1 and "1" in p["current"]
     assert fighist.payload([2]) == {"history": {}, "current": {}}
+
+
+# ---- 実行の途中で描き直した図（0.0.6） ------------------------------------------
+
+
+def loop_script(n):
+    import numpy as np
+
+    x = np.linspace(0, 6, 50)
+    for i in range(1, n + 1):
+        fig, ax = plt.subplots(clear=True, num=0)
+        fig.set_size_inches(4, 3)
+        ax.plot(x, np.sin(x * i))
+
+
+def test_loop_redraw_keeps_intermediate(tmp_path):
+    """ループで同じ番号を clear=True で描き直すと、途中の図が順に履歴へ並ぶ"""
+    fighist.install(tmp_path)
+    fighist.set_label("loop.py")
+    loop_script(3)
+    fighist.capture(tmp_path)
+    labels = [h["label"] for h in hist(0)]
+    assert labels == ["loop.py · 途中 1", "loop.py · 途中 2"]  # 3 枚目は「今の姿」
+    assert fighist._current[0]["label"] == "loop.py"
+    assert all((tmp_path / h["file"]).exists() for h in hist(0))
+
+    # もう一度実行すると、前回の最後の姿も履歴に入る
+    fighist.set_label("loop.py")
+    loop_script(3)
+    fighist.capture(tmp_path)
+    assert len(hist(0)) == 3  # 上限 3
+
+
+def test_clf_and_close_in_loop(tmp_path):
+    fighist.install(tmp_path)
+    fighist.set_label("a.py")
+    plt.figure(1)
+    plt.plot([1, 2])
+    plt.clf()
+    plt.plot([2, 1])
+    plt.close(1)
+    plt.figure(1)
+    plt.plot([1, 1])
+    fighist.capture(tmp_path)
+    assert [h["label"] for h in hist(1)] == ["a.py · 途中 1", "a.py · 途中 2"]
+
+
+def test_intermediate_limit_per_run(tmp_path, capsys):
+    """途中の図は 1 回の実行で上限枚数まで。超えた分は省略して知らせる"""
+    fighist.install(tmp_path)
+    fighist.set_label("loop.py")
+    loop_script(6)
+    assert fighist._steps[0] == 3 and fighist._skipped[0] == 2
+    fighist.report_skipped()
+    assert "残りの 2 枚は省略" in capsys.readouterr().err
+
+
+def test_not_installed_or_suspended_does_nothing(tmp_path):
+    fighist.set_label("a.py")  # install していない（webagg 以外のバックエンド）
+    loop_script(3)
+    assert hist(0) == [] and 0 not in fighist._current
+    fighist.install(tmp_path)
+    with fighist.suspended():
+        plt.close(0)
+    assert 0 not in fighist._current

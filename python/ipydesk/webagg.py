@@ -30,6 +30,17 @@ _loop = None
 _thread = None
 url: str | None = None
 
+# figure の描画を 1 つずつ行うためのロック。
+# webagg のブラウザからの要求（描画・リサイズ・マウス操作）はサーバースレッドで処理される一方、
+# savefig（Figure の履歴の記録・スクリプト中の fig.savefig）は IPython 側のメインスレッドで動く。
+# 両者が同時に同じ figure を描くと壊れるので、どちらもこのロックの中で行う。
+# 同じスレッドからの入れ子（Copy ボタン → savefig）があるので RLock にする。
+lock = threading.RLock()
+
+# savefig 中に来たブラウザからの要求をやり直す間隔と回数（0.05 秒 × 40 回 = 最大 2 秒待つ）
+_RETRY_SEC = 0.05
+_RETRY_MAX = 40
+
 
 def _force_full_redraw_on_resize() -> None:
     """resize のたびにフル画像を返させる。
@@ -56,6 +67,43 @@ def _force_full_redraw_on_resize() -> None:
 
     handle_resize._ipydesk_patched = True
     canvas_cls.handle_resize = handle_resize
+
+
+def _install_draw_lock() -> None:
+    """savefig とブラウザからの描画要求がぶつからないようにする。
+
+    matplotlib の savefig（print_figure）は、GUI を揺らさないよう保存の間だけ
+    canvas.manager を None にする。そこへ別スレッドのサーバーがブラウザの "draw" 要求を
+    処理すると、canvas.draw() の最後の self.manager.refresh_all() が
+    AttributeError: 'NoneType' object has no attribute 'refresh_all' で落ちる。
+    （Figure の履歴は実行が終わるたびに savefig で図を画像にするので、図を開いたまま
+    matplotlib を使わない別のスクリプトを F5 しただけでも起きていた）
+
+    - print_figure と handle_event を同じロックで挟み、同時に動かないようにする
+    - それでも manager が無い（ロックの外で保存中など）ときは、要求を捨てずに少し後でやり直す
+    """
+    from matplotlib.backends import backend_webagg_core as core
+
+    canvas_cls = core.FigureCanvasWebAggCore
+    if getattr(canvas_cls, "_ipydesk_draw_lock", False):
+        return
+    _print, _handle = canvas_cls.print_figure, canvas_cls.handle_event
+
+    def print_figure(self, *args, **kwargs):
+        with lock:
+            return _print(self, *args, **kwargs)
+
+    def handle_event(self, event, _tries=0):
+        with lock:
+            if self.manager is not None and not getattr(self, "_is_saving", False):
+                return _handle(self, event)
+        if _loop is not None and _tries < _RETRY_MAX:
+            _loop.call_later(_RETRY_SEC, handle_event, self, event, _tries + 1)
+        return None
+
+    canvas_cls.print_figure = print_figure
+    canvas_cls.handle_event = handle_event
+    canvas_cls._ipydesk_draw_lock = True
 
 
 def _clipboard_ps(png_path: Path) -> None:
@@ -217,6 +265,7 @@ def start_server(port: int = 8988, address: str = "127.0.0.1") -> str:
     mpl.rcParams["webagg.address"] = address
 
     _force_full_redraw_on_resize()
+    _install_draw_lock()
     _install_toolbar_items(W)
     _install_assets(W)
     _install_threadsafe_send(W)

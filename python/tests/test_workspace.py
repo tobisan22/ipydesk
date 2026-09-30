@@ -163,10 +163,11 @@ def test_variables_from_the_first_run_stay_visible():
     """
     from IPython.terminal.ipapp import TerminalIPythonApp
 
-    from ipydesk.__main__ import ipython_config
+    from ipydesk.__main__ import IPyDeskApp, ipython_config
 
     TerminalIPythonApp.clear_instance()
-    app = TerminalIPythonApp.instance(config=ipython_config(["x_first = 1"]))
+    IPyDeskApp.clear_instance()
+    app = IPyDeskApp.instance(config=ipython_config(), ipydesk_lines=["x_first = 1"])
     try:
         app.initialize([])
         ip = app.shell
@@ -177,4 +178,5 @@ def test_variables_from_the_first_run_stay_visible():
         from IPython.core.interactiveshell import InteractiveShell
 
         InteractiveShell.clear_instance()
+        IPyDeskApp.clear_instance()
         TerminalIPythonApp.clear_instance()

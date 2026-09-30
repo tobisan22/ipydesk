@@ -34,7 +34,8 @@ from pathlib import Path
 # VS Code 拡張からは環境変数でも渡しているが、ターミナルから直接起動した場合に備える。
 os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
 
-from IPython import start_ipython
+from IPython.terminal.ipapp import TerminalIPythonApp
+from traitlets import List, Unicode
 from traitlets.config import Config
 
 from . import core
@@ -135,11 +136,32 @@ def parse_args(argv: list[str]) -> tuple[Path | None, tuple[int, int] | None]:
     return script, cell
 
 
-def ipython_config(exec_lines: list[str]) -> Config:
-    """セッションの IPython 設定（テストから検証できるよう分けてある）"""
+class IPyDeskApp(TerminalIPythonApp):
+    """ipydesk のセッション。プロファイルの設定の後ろに ipydesk の拡張と起動行を足す。
+
+    extensions / exec_lines を Config で渡すと、その値がプロファイルの ipython_config.py より
+    優先され、ユーザーの設定が丸ごと消える（append / extend の遅延指定でも同じ）。
+    そこで設定ファイルを読み終えた後、拡張の読み込み・起動行の実行の直前に足す。
+    実行順: プロファイルの extensions → ipydesk.core → startup ファイル →
+            プロファイルの exec_lines → ipydesk の起動行（バックエンド・最初のスクリプト）
+    """
+
+    ipydesk_lines = List(Unicode()).tag(config=False)
+
+    def init_extensions(self):
+        if "ipydesk.core" not in self.extensions:
+            self.extensions = [*self.extensions, "ipydesk.core"]
+        super().init_extensions()
+
+    def init_code(self):
+        self.exec_lines = [*self.exec_lines, *self.ipydesk_lines]
+        super().init_code()
+
+
+def ipython_config() -> Config:
+    """セッションの IPython 設定（テストから検証できるよう分けてある）。
+    ここに書いた値はプロファイルの設定より優先される"""
     c = Config()
-    c.InteractiveShellApp.extensions = ["ipydesk.core"]
-    c.InteractiveShellApp.exec_lines = exec_lines
     # 既定（True）では exec_lines で作られた変数が user_ns_hidden に入り、%who からも
     # ワークスペースビューからも消える。起動時のスクリプト実行（%ipydesk / %ipydesk_cell）も
     # exec_lines の 1 行なので、1 回目の F5 で作った変数がすべて隠れてしまう。
@@ -178,10 +200,10 @@ def main() -> None:
     port = int(os.environ.get("IPYDESK_PORT", "8988"))
     exec_lines = startup_lines(mpl, port, script, cell, post_mortem)
 
-    c = ipython_config(exec_lines)
+    c = ipython_config()
 
     print(f"[ipydesk] session started ({mpl} backend). F5 で再実行 / exit で終了")
-    start_ipython(argv=[], config=c)
+    IPyDeskApp.launch_instance(argv=[], config=c, ipydesk_lines=exec_lines)
 
 
 if __name__ == "__main__":

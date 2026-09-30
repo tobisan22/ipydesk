@@ -4,6 +4,26 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.6] - 2026-09-30
+
+### Added
+
+- **実行途中の図も Figure の履歴に残す**: ループの中で同じ番号の figure を描き直すと（`plt.subplots(num=0, clear=True)`・`plt.clf()`・`plt.close()` してから同じ番号で作り直す）、これまでは実行が終わった時点の図しか残りませんでした。消される直前の図をその場で画像にし、「スクリプト名 · 途中 1」「途中 2」… の見出しで履歴に並べます。
+  - 画像にするのに時間がかかるため、1 回の実行で figure ごとに `ipydesk.figureHistory` の枚数（既定 20）まで記録します（最初の N 枚）。超えた分は省略し、ターミナルに一度だけ知らせます。
+  - `ax.cla()` で Axes だけを消す描き直しは対象外です（figure 全体が消えるときだけ記録します）。
+
+### Fixed
+
+- 図を開いたまま、matplotlib を使わない別のスクリプトを同じセッションで実行すると、ターミナルに `Uncaught exception GET /0/ws ... AttributeError: 'NoneType' object has no attribute 'refresh_all'` が出る問題を修正しました。
+  - 原因: 実行が終わるたびに Figure の履歴が `savefig` で図を画像にしており、matplotlib は保存の間だけ `canvas.manager` を `None` にします。そこへ webagg のサーバースレッドが Figure タブ（ブラウザ）からの描画要求を処理すると、`canvas.draw()` の最後の `self.manager.refresh_all()` で落ちていました（スクリプト中の `fig.savefig` でも起こり得ました）。
+  - `savefig` とブラウザからの要求（描画・リサイズ・マウス操作）を同じロックで順番に処理するようにし、保存中に届いた要求は捨てずに少し後でやり直します。
+- セッションの起動時に、IPython プロファイルの startup ファイル（`~/.ipython/profile_default/startup/`）と `ipython_config.py` の `exec_lines` が 2 回実行されていた問題を修正しました。
+  - 原因: ipydesk が IPython の起動前に ipdb からデバッガのクラスを取得しており、そのとき ipdb が設定を読むためだけに使い捨ての IPython を初期化していました。IPython のデバッガ（`TerminalPdb`）を直接使うようにしました。
+  - あわせて、プロファイルの `exec_lines` と `extensions` が ipydesk の設定で上書きされ、本物のセッションでは実行されていなかった問題も修正しました。プロファイルの分を先に実行し、その後に ipydesk の起動処理（図のバックエンド・最初のスクリプト）を続けます。
+- `%ipydesk` / セル実行を `%run -i` と同じ条件にそろえました。
+  - ipydesk 内部の `from __future__ import annotations` がスクリプトへ漏れ、関数の型注釈が文字列になっていたのを修正しました（`f.__annotations__` が `{'x': 'int'}` ではなく `{'x': int}` になります）。
+  - 実行中の `sys.argv` をスクリプト名にしました（終わったら元に戻します）。
+
 ## [0.0.5] - 2026-09-29
 
 ### Fixed

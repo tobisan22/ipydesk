@@ -28,12 +28,33 @@ from pathlib import Path
 
 from . import fighist, varview, workspace
 
-try:
-    from ipdb.__main__ import _get_debugger_cls
 
-    Pdb = _get_debugger_cls()  # IPython 補完・色付きの pdb
-except ImportError:  # ipdb 未導入なら標準 pdb
-    from pdb import Pdb
+def _debugger_base():
+    """デバッガの基底クラス（IPython 補完・色付きの pdb）。
+
+    以前は ipdb の _get_debugger_cls() を使っていたが、IPython がまだ起動していないと
+    （python -m ipydesk はセッションを起動する前にこのモジュールを import する）、
+    ipdb は設定を読むためだけに使い捨ての TerminalIPythonApp を作って initialize する。
+    その時点でプロファイルの startup ファイルと exec_lines が実行され、本物のセッションの
+    起動でもう一度実行されていた（起動時処理が 2 回動く）。
+    ipdb が最終的に返すのは shell.debugger_cls（端末なら TerminalPdb）なので、直接使う。
+    """
+    try:
+        from IPython import get_ipython
+
+        shell = get_ipython()
+        if shell is not None:  # 既存の IPython から %load_ext ipydesk.core された
+            return shell.debugger_cls
+        from IPython.terminal.debugger import TerminalPdb
+
+        return TerminalPdb
+    except ImportError:  # IPython なしでは標準 pdb
+        from pdb import Pdb
+
+        return Pdb
+
+
+Pdb = _debugger_base()
 
 # VS Code 拡張とやり取りするファイル名（すべて .vscode/ 直下）
 BP_NAME = "py_breakpoints.json"  # 拡張 → Python : 赤丸の一覧
@@ -139,8 +160,28 @@ def apply_figure_closes(vscode_dir: Path | None) -> None:
         m = Gcf.figs.get(num)
         if m is None or (fid and f"{id(m):x}" != fid):
             continue
-        plt.close(m.canvas.figure)
+        with fighist.suspended():  # 閉じたタブの図は履歴ごと捨てるので、途中の姿も記録しない
+            plt.close(m.canvas.figure)
         fighist.forget(num, vscode_dir)
+
+
+def start_figure_history(vscode_dir: Path | None) -> None:
+    """実行の途中で描き直された図も履歴に残せるようにする（実行の前に呼ぶ）。
+
+    Figure の履歴は webagg（Figure タブ）のときだけ使うので、それ以外では書き出し先を
+    None にして何もしない。webagg の起動時点では pyplot はまだ読み込まれていない
+    （最初のスクリプトが import する）ので、pyplot の有無では判断しない。
+    """
+    folder = None
+    if vscode_dir is not None and "matplotlib" in sys.modules:
+        try:
+            from ipydesk import webagg
+
+            if webagg.url:
+                folder = vscode_dir
+        except ImportError:
+            pass
+    fighist.install(folder)
 
 
 def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> None:
@@ -411,6 +452,7 @@ def _execute(script: Path, vsdir, run, post_mortem: bool = False) -> None:
     global _last_error, error_info
     _last_error = error_info = None  # 前のエラーは、次の実行を始めた時点で見られなくなる
     out = out_dir(vsdir)
+    start_figure_history(out)
     dbg = VsPdb(script, vsdir, out)
     dbg.sync_breakpoints(force=True)
 
@@ -438,6 +480,7 @@ def _execute(script: Path, vsdir, run, post_mortem: bool = False) -> None:
         dbg._clear_state()
         dbg.clear_all_breaks()
         notify_figures(out)
+        fighist.report_skipped()
 
 
 def post_mortem_last() -> None:
@@ -471,10 +514,24 @@ def run_script(script: Path, ns: dict, post_mortem: bool = False) -> None:
 
     ns["__file__"] = str(script)
     ns.setdefault("__name__", "__main__")
-    code = compile(script.read_text(encoding="utf-8"), str(script), "exec")
+    # dont_inherit: このモジュールの `from __future__ import annotations` をスクリプトへ
+    # 持ち込まない（持ち込むと注釈が文字列になり、%run -i と挙動が変わる）
+    code = compile(
+        script.read_text(encoding="utf-8"), str(script), "exec", dont_inherit=True
+    )
     fighist.set_label(script.name)
 
-    _execute(script, vsdir, lambda: exec(code, ns), post_mortem)
+    _execute(script, vsdir, lambda: _exec_as_script(script, code, ns), post_mortem)
+
+
+def _exec_as_script(script: Path, code, ns: dict) -> None:
+    """%run -i と同じく、実行中だけ sys.argv をスクリプト名にして ns で実行する"""
+    saved = sys.argv
+    sys.argv = [str(script)]
+    try:
+        exec(code, ns)
+    finally:
+        sys.argv = saved
 
 
 # ---- セル実行（# %% 区切り / 選択範囲 / 現在行） --------------------------------
@@ -499,8 +556,8 @@ def compile_range(src: str, start: int, filename: str):
     tail = None
     if mod.body and isinstance(mod.body[-1], ast.Expr):
         expr = mod.body.pop()
-        tail = compile(ast.Expression(expr.value), filename, "eval")
-    return compile(mod, filename, "exec"), tail
+        tail = compile(ast.Expression(expr.value), filename, "eval", dont_inherit=True)
+    return compile(mod, filename, "exec", dont_inherit=True), tail
 
 
 def run_cell(
@@ -535,7 +592,7 @@ def run_cell(
     ns.setdefault("__name__", "__main__")
 
     def run():
-        exec(code, ns)
+        _exec_as_script(script, code, ns)
         if tail is not None:
             sys.displayhook(eval(tail, ns))  # 末尾の式は Out[n] として表示
 
@@ -598,6 +655,7 @@ def load_ipython_extension(ip):
     def mark_busy(info=None, *_):
         write_session(True)
         apply_figure_closes(vsdir)  # 閉じたタブの図へ plt.plot が描き足さないよう、実行前に閉じる
+        start_figure_history(vsdir)  # プロンプトで打ったループの途中の図も履歴に残す
         raw = getattr(info, "raw_cell", None)
         if raw:  # プロンプトで打った行。%ipydesk なら実行側がスクリプト名で上書きする
             fighist.set_label(raw.strip().splitlines()[0] if raw.strip() else "")
@@ -606,6 +664,7 @@ def load_ipython_extension(ip):
         write_session(False)
         update_workspace()
         notify_figures(vsdir, only_if_changed=True)  # プロンプトで描いた図もタブに出す
+        fighist.report_skipped()
 
     # F5 / セル実行（%ipydesk・%ipydesk_cell もセルの 1 つ）/ プロンプトで打った 1 行、すべての前後
     ip.events.register("pre_run_cell", mark_busy)
