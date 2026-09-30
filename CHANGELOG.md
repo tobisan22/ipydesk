@@ -4,6 +4,13 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.7] - 2026-09-30
+
+### Changed
+
+- README（Marketplace のページ）に、F5 で実行 → 図のタブで拡大・コピー・履歴を確認する流れのデモ GIF を追加しました。
+- `package.json` にリポジトリ（GitHub）・Issues・ホームページの URL を追加しました。
+
 ## [0.0.6] - 2026-09-30
 
 ### Added

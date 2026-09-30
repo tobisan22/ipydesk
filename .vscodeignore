@@ -22,3 +22,9 @@ python/pyproject.toml
 python/**/*.egg-info/**
 **/__pycache__/**
 **/.pytest_cache/**
+
+# README 用の素材（Marketplace は GitHub から表示するので vsix には不要）
+demo/**
+media/*.gif
+*.gif
+*.vsix

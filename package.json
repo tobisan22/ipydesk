@@ -2,7 +2,10 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.6",
+  "version": "0.0.7",
+  "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
+  "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
+  "homepage": "https://github.com/tobisan22/ipydesk#readme",
   "publisher": "bisan",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -147,7 +150,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "package": "npx @vscode/vsce package --target win32-x64 --allow-missing-repository",
+    "package": "npx @vscode/vsce package --target win32-x64",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./"
   },
