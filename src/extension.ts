@@ -33,6 +33,7 @@ import * as path from "path";
 import * as http from "http";
 import { execFile } from "child_process";
 import { WORKSPACE_NAME, WorkspaceViewProvider, WsData } from "./workspaceView";
+import { NotesViewProvider } from "./notesView";
 import { VariableEditor, VarQuery } from "./variableEditor";
 import { FigureInfo, figureHtml } from "./figurePanel";
 
@@ -222,6 +223,18 @@ export function activate(context: vscode.ExtensionContext) {
   const workspaceView = new WorkspaceViewProvider();
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(WorkspaceViewProvider.viewType, workspaceView));
+
+  // ---- メモ（Notes ビュー）----
+  // 保存先はユーザー単位（globalStorage/notes.md）。どのフォルダを開いても同じメモ
+  const notesView = new NotesViewProvider(context.globalStorageUri, context.globalState,
+    vscode.Uri.joinPath(context.extensionUri, "resources", "default-notes.md").fsPath);
+  context.subscriptions.push(
+    notesView,
+    vscode.window.registerWebviewViewProvider(NotesViewProvider.viewType, notesView,
+      { webviewOptions: { retainContextWhenHidden: true } }),   // 隠しても入力位置・元に戻す履歴を保つ
+    vscode.commands.registerCommand("ipydesk.openNotesFile", () => notesView.openFile()),
+    vscode.commands.registerCommand("ipydesk.addToNotes", () => notesView.addSelection()),
+    vscode.commands.registerCommand("ipydesk.restoreDefaultNotes", () => notesView.restoreDefaults()));
 
   const config = () => vscode.workspace.getConfiguration("ipydesk");
 

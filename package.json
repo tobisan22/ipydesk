@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
   "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
   "homepage": "https://github.com/tobisan22/ipydesk#readme",
@@ -21,7 +21,8 @@
     },
     "views": {
       "ipydesk": [
-        { "type": "webview", "id": "ipydesk.workspace", "name": "Workspace" }
+        { "type": "webview", "id": "ipydesk.workspace", "name": "Workspace" },
+        { "type": "webview", "id": "ipydesk.notes", "name": "Notes" }
       ]
     },
     "commands": [
@@ -43,7 +44,10 @@
       { "command": "ipydesk.openFigures", "title": "IPyDesk: Open Figures", "icon": "$(graph)" },
       { "command": "ipydesk.copyFigure", "title": "IPyDesk: Copy Figure Image", "icon": "$(copy)" },
       { "command": "ipydesk.openVariable", "title": "IPyDesk: Open Variable…", "icon": "$(table)" },
-      { "command": "ipydesk.openDesk", "title": "IPyDesk: Open Desk", "icon": "$(layout)" }
+      { "command": "ipydesk.openDesk", "title": "IPyDesk: Open Desk", "icon": "$(layout)" },
+      { "command": "ipydesk.openNotesFile", "title": "IPyDesk: Open Notes File", "icon": "$(go-to-file)" },
+      { "command": "ipydesk.addToNotes", "title": "IPyDesk: Add Selection to Notes", "icon": "$(note)" },
+      { "command": "ipydesk.restoreDefaultNotes", "title": "IPyDesk: Restore Default Notes", "icon": "$(history)" }
     ],
     "keybindings": [
       { "command": "ipydesk.run",      "key": "f5",             "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
@@ -67,7 +71,12 @@
       ],
       "view/title": [
         { "command": "ipydesk.openVariable", "when": "view == ipydesk.workspace", "group": "navigation@1" },
-        { "command": "ipydesk.openDesk",     "when": "view == ipydesk.workspace", "group": "navigation@2" }
+        { "command": "ipydesk.openDesk",     "when": "view == ipydesk.workspace", "group": "navigation@2" },
+        { "command": "ipydesk.openNotesFile", "when": "view == ipydesk.notes", "group": "navigation@1" },
+        { "command": "ipydesk.restoreDefaultNotes", "when": "view == ipydesk.notes", "group": "1_notes@1" }
+      ],
+      "editor/context": [
+        { "command": "ipydesk.addToNotes", "when": "editorTextFocus", "group": "9_ipydesk@1" }
       ],
       "webview/context": [
         { "command": "ipydesk.openVariable", "when": "webviewId == 'ipydesk.workspace' && webviewSection == 'var'" }

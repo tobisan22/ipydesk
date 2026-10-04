@@ -4,6 +4,19 @@ All notable changes to the "ipydesk" extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Notes ビュー（メモ）**: アクティビティバーの IPyDesk に NOTES を追加しました。入力すると自動で保存します。
+  - メモを**セクション**に分けられます。セクションごとに名前の変更・折りたたみ・本文のコピー（⧉）・削除ができます。折りたたみの状態も保存されます。
+  - 中身は Markdown の `notes.md` で、`## 名前` の行がセクションの区切りです。
+  - セクションは ⋮⋮ のドラッグ、または Alt+↑ / Alt+↓ で並べ替えられます。
+  - **デフォルトのメモ**（IPyDesk のショートカット、matplotlib の subplots、軸の範囲・目盛り、外部 exe の実行）を入れます。普通のセクションと同じく削除でき、消しても再び入ることはありません（今後の更新で増えたデフォルトのメモは、増えた分だけ入ります）。「IPyDesk: Restore Default Notes」で、消したものだけを戻せます。
+  - 保存先はユーザー単位（拡張の globalStorage の `notes.md`）で、どのフォルダを開いても同じメモが出ます。複数ウィンドウで開いていても内容が同期します。
+  - 「IPyDesk: Add Selection to Notes」（エディタの右クリック）で、選択範囲（無ければ現在行）をファイル名・行番号・時刻つきで、最後に入力したセクションへ追記します。
+  - 「IPyDesk: Open Notes File」（NOTES 右上）で `notes.md` をエディタで開けます。
+
 ## [0.0.7] - 2026-09-30
 
 ### Changed
