@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-10-04
+
 ### Added
 
 - **Notes ビュー（メモ）**: アクティビティバーの IPyDesk に NOTES を追加しました。入力すると自動で保存します。
