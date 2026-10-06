@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.9",
+  "version": "0.1.0",
   "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
   "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
   "homepage": "https://github.com/tobisan22/ipydesk#readme",
@@ -146,6 +146,16 @@
           "default": 20,
           "minimum": 0,
           "description": "同じ figure を描き直したとき、前の図を Figure タブの上側に残す枚数（figure ごと）。0 で残さない。変更は新しいセッションから有効"
+        },
+        "ipydesk.breakpointMode": {
+          "type": "string",
+          "enum": ["inject", "trace"],
+          "enumDescriptions": [
+            "赤丸の行に「止まるための呼び出し」を埋め込んで実行する。止まるまで速度が落ちない（既定）",
+            "従来のトレース（sys.settrace）で止める。遅くなるが、埋め込みで問題が出たときの戻し先"
+          ],
+          "default": "inject",
+          "description": "赤丸で止まる方式。変更は次の実行から有効"
         },
         "ipydesk.slowRunNotifySec": {
           "type": "number",

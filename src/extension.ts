@@ -141,6 +141,12 @@ function enabledBreakpoints(): vscode.SourceBreakpoint[] {
     .filter(b => b.enabled && b.location.uri.fsPath.endsWith(".py"));
 }
 
+/** 赤丸の方式。inject: 赤丸の行に止まる呼び出しを埋め込む（速い）/ trace: 従来のトレース */
+function breakpointMode(): "inject" | "trace" {
+  return vscode.workspace.getConfiguration("ipydesk").get<string>("breakpointMode") === "trace"
+    ? "trace" : "inject";
+}
+
 function dumpBreakpoints() {
   const dir = vscodeDir();
   if (!dir) { return; }
@@ -155,7 +161,7 @@ function dumpBreakpoints() {
     }));
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, BP_NAME),
-    JSON.stringify({ active: bpActive, breakpoints: bps }, null, 2), "utf8");
+    JSON.stringify({ active: bpActive, mode: breakpointMode(), breakpoints: bps }, null, 2), "utf8");
 }
 
 // ---- セル（`# %%` / `#%%` 区切り）---------------------------------------------
@@ -321,7 +327,9 @@ export function activate(context: vscode.ExtensionContext) {
       bpStatus.show();
     } else if (n > 0) {
       bpStatus.text = `$(circle-filled) BP ${n}`;
-      bpStatus.tooltip = "赤丸があると、実行はトレース付きになり遅くなることがあります。"
+      bpStatus.tooltip = (breakpointMode() === "trace"
+        ? "赤丸があると、実行はトレース付きになり遅くなります（ipydesk.breakpointMode: trace）。"
+        : "赤丸の行に止まる呼び出しを埋め込んで実行します（止まるまでは速度が落ちません）。")
         + "クリックで赤丸の一覧を表示（Ctrl+F5 は赤丸を無視して実行）";
       bpStatus.backgroundColor = undefined;
       bpStatus.show();
@@ -1016,10 +1024,17 @@ export function activate(context: vscode.ExtensionContext) {
 
   // ---- 赤丸 ----
   dumpBreakpoints();
-  context.subscriptions.push(vscode.debug.onDidChangeBreakpoints(() => {
-    dumpBreakpoints();
-    updateBpStatus();
-  }));
+  context.subscriptions.push(
+    vscode.debug.onDidChangeBreakpoints(() => {
+      dumpBreakpoints();
+      updateBpStatus();
+    }),
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration("ipydesk.breakpointMode")) {
+        dumpBreakpoints();
+        updateBpStatus();
+      }
+    }));
 
   // ---- セル / 選択範囲の実行 ----
   const pythonEditor = (): vscode.TextEditor | undefined => {

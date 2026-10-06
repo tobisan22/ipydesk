@@ -1,6 +1,6 @@
 [project]
 name = "ipydesk"
-version = "0.0.9"
+version = "0.1.0"
 description = "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run."
 requires-python = ">=3.9"
 dependencies = [

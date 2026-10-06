@@ -1,4 +1,4 @@
-"""赤丸があっても実行が遅くならない仕組み（0.0.9）の回帰テスト
+"""赤丸があっても実行が遅くならない仕組み（0.0.9）の回帰テスト — トレース方式（mode: trace）
 
 - 続行中、赤丸のないファイルの関数呼び出しは bdb の重い処理（dispatch_call）に入らない
 - 赤丸のあるファイルの関数は従来どおり止まる
@@ -45,9 +45,10 @@ def ws(tmp_path, monkeypatch):
     sys.modules.pop("helper", None)
 
 
-def set_bps(ws, *items, form="dict", active=True):
+def set_bps(ws, *items, form="dict", active=True, mode="trace"):
+    """既定は従来のトレース方式（このファイルはトレースの高速パスのテスト）"""
     bps = [{"file": str(f), "line": ln, "enabled": True} for f, ln in items]
-    data = {"active": active, "breakpoints": bps} if form == "dict" else bps
+    data = {"active": active, "mode": mode, "breakpoints": bps} if form == "dict" else bps
     (ws.vs / core.BP_NAME).write_text(json.dumps(data), encoding="utf-8")
 
 

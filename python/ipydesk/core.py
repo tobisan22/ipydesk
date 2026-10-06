@@ -27,7 +27,7 @@ import traceback
 from bdb import BdbQuit
 from pathlib import Path
 
-from . import fighist, varview, workspace
+from . import fighist, inject, varview, workspace
 
 
 def _debugger_base():
@@ -58,13 +58,14 @@ def _debugger_base():
 Pdb = _debugger_base()
 
 # VS Code 拡張とやり取りするファイル名（すべて .vscode/ 直下）
-BP_NAME = "py_breakpoints.json"  # 拡張 → Python : 赤丸の一覧
+BP_NAME = inject.BP_NAME  # 拡張 → Python : 赤丸の一覧
 STATE_NAME = "py_debug_state.json"  # Python → 拡張 : 現在の停止位置
 SESSION_NAME = "py_session.json"  # Python → 拡張 : IPython セッション生存通知
 
 # この中のモジュールでは絶対に停止しない（ステップインでも潜らない）
 SKIP = [
     "ipydesk.core",  # セル実行はこのモジュールの関数を経由するので、その中では止まらない
+    "ipydesk.inject",  # 埋め込んだ __ipydesk_bp__ の中へはステップ実行で潜らない
     "runpy",
     "importlib*",
     "_frozen_importlib*",
@@ -254,6 +255,25 @@ def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> No
         print(f"[ipydesk] figure 一覧の書き出しに失敗: {e}", file=sys.stderr)
 
 
+_MISSING = object()
+
+
+def _loaded_files() -> set[str]:
+    """import 済みのモジュールのファイル（正規化済み）"""
+    # 数百のモジュールがあるので、Path.resolve（ファイルシステムを引く）は使わない。
+    # 照合する側は canon と abspath の両方の綴りで探す（_is_loaded）
+    files = set()
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if isinstance(f, str):
+            files.add(os.path.normcase(os.path.abspath(f)))
+    return files
+
+
+def _is_loaded(file: str, loaded: set[str]) -> bool:
+    return inject.canon(file) in loaded or os.path.normcase(os.path.abspath(file)) in loaded
+
+
 def find_vscode_dir(start: Path) -> Path | None:
     """start から親ディレクトリへ辿り、赤丸 JSON を持つ .vscode/ を返す"""
     if env := os.environ.get("IPYDESK_FILE"):
@@ -280,7 +300,13 @@ class VsPdb(Pdb):
         self._bp_mtime: float | None = None
         # co_filename → bdb.breaks のキー（trace_dispatch の近道用）
         self._canon: dict[str, str] = {}
-        self.loaded: list[dict] = []
+        self.loaded: list[dict] = []  # トレース（bdb）で止める赤丸 {"file", "line"}
+        self.plan: inject.ScriptPlan | None = None  # 今回の実行の注入計画
+        self.inj_conds: dict[tuple[str, int], str | None] = {}  # 注入で止める赤丸 → 条件
+        self.last_stop: tuple | None = None  # ステップ実行で最後に止まった (フレーム, 行)
+        self._from_hit = False  # 対話が埋め込んだ呼び出しからの停止か
+        self._started = False  # 最初の同期を終えたか（実行中に足された赤丸の扱いが変わる）
+        self.hit_used = False  # 埋め込んだ呼び出しからトレースを入れたか
 
     def setup(self, f, tb):
         super().setup(f, tb)
@@ -342,11 +368,80 @@ class VsPdb(Pdb):
         self._bp_mtime = mtime
 
         self.clear_all_breaks()
-        self.loaded = []  # 拡張へ知らせる用の、元の綴りのままの {"file", "line"}
-        for bp in load_breakpoints(self.vscode_dir):
+        self.loaded = []
+        self.inj_conds = {}
+        mode, bps = inject.read_bp_file(self.vscode_dir)
+        loaded_files: set[str] | None = None
+        for bp in bps:
             file = str(Path(bp["file"]).resolve())
-            self.set_break(file, bp["line"], cond=bp.get("condition") or None)
-            self.loaded.append({"file": file, "line": bp["line"]})
+            line = bp["line"]
+            cond = bp.get("condition") or None
+            key = inject.canon(file)
+            route = "bdb"
+            if mode == "inject":
+                if line in inject.injected_by_file.get(key, ()):
+                    route = "inj"  # 埋め込み済み
+                elif self.plan is not None and key == self.plan.file:
+                    # 今回 compile した範囲の外。最初の同期では、関数の中のものだけトレースで止める。
+                    # 実行中（停止中）に足された赤丸は、どの行でも止められるようトレースにする
+                    if not self._started and line not in self.plan.bdb_lines:
+                        route = "skip"
+                elif not os.path.exists(file):
+                    route = "skip"
+                else:
+                    if loaded_files is None:
+                        loaded_files = _loaded_files()
+                    # import 済みならもう注入できない（トレース）。まだなら import 時に注入する
+                    route = "bdb" if _is_loaded(file, loaded_files) else "inj"
+            if route == "inj":
+                self.inj_conds[(key, line)] = cond
+            elif route == "bdb":
+                self.set_break(file, line, cond=cond)
+                self.loaded.append({"file": file, "line": line})
+        self._started = True
+
+    # --- 埋め込んだ呼び出しからの停止 ---------------------------------------------
+    def inject_hit(self, key, frame) -> None:
+        """__ipydesk_bp__ / __ipydesk_bp_cond__ から呼ばれる。有効な赤丸なら frame で止まる"""
+        cond = self.inj_conds.get(key, _MISSING)
+        if cond is _MISSING:  # 外された・無効にされた・今回の実行の対象ではない
+            return
+        stop = self.last_stop
+        if stop is not None and stop[0] is frame and stop[1] == frame.f_lineno:
+            # ステップ実行でこの行に止まったあと、続けて呼び出しを通るところ（二重に止まらない）
+            self.last_stop = None
+            return
+        if cond:
+            try:
+                if not eval(cond, frame.f_globals, frame.f_locals):
+                    return
+            except Exception:  # 条件が評価できないときは、bdb と同じく止まる
+                pass
+        self.stop_at(frame)
+
+    def stop_at(self, frame) -> None:
+        """frame にトレースを入れて、その行で対話に入る（set_trace と同じ処理のあと user_line）。
+        set_trace だけだと同じ行では line イベントが出ず、1 文遅れて止まってしまう"""
+        self.hit_used = True
+        self._from_hit = True
+        try:
+            self.reset()
+            f = frame
+            while f is not None:  # _execute より外（IPython 本体）にはトレースを広げない
+                f.f_trace = self.trace_dispatch
+                self.botframe = f
+                if f.f_code is _EXECUTE_CODE:
+                    break
+                f = f.f_back
+            self.set_step()
+            sys.settrace(None)  # 対話の中（pdb 自身の関数）をトレースしない
+            self.user_line(frame)
+            if self.quitting:  # q で抜けた。直接呼んだので、トレースの側からは BdbQuit が出ない
+                raise BdbQuit
+            if self.breaks or self.stoplineno != -1:  # c で全速に戻るとき以外は、トレースを戻す
+                sys.settrace(self.trace_dispatch)
+        finally:
+            self._from_hit = False
 
     def precmd(self, line: str) -> str:
         self.sync_breakpoints()  # c / n / s 等の直前に最新の赤丸へ揃える
@@ -427,6 +522,8 @@ class VsPdb(Pdb):
     # --- 停止位置の通知（拡張側がハイライトに使う） ---------------------------
     def interaction(self, frame, tb_or_exc):
         global active_debugger
+        if frame is not None and not self._from_hit:
+            self.last_stop = (frame, frame.f_lineno)
         self._write_state(frame)
         prev, active_debugger = active_debugger, self
         try:
@@ -454,21 +551,8 @@ class VsPdb(Pdb):
 
 
 def load_breakpoints(vscode_dir: Path | None) -> list[dict]:
-    """有効な赤丸の一覧。拡張が「全赤丸を一時無効」にしている間（"active": false）は空。
-
-    ファイルの形は {"active": bool, "breakpoints": [...]}。以前の形（赤丸の配列そのまま）も読める。
-    """
-    if vscode_dir is None:
-        return []
-    bp_file = vscode_dir / BP_NAME
-    if not bp_file.exists():
-        return []
-    raw = json.loads(bp_file.read_text(encoding="utf-8"))
-    if isinstance(raw, dict):
-        if not raw.get("active", True):
-            return []
-        raw = raw.get("breakpoints", [])
-    return [b for b in raw if b.get("enabled", True)]
+    """有効な赤丸の一覧。拡張が「全赤丸を一時無効」にしている間（"active": false）は空"""
+    return inject.read_bp_file(vscode_dir)[1]
 
 
 def _user_frame_where(tb) -> str | None:
@@ -491,8 +575,25 @@ def _remember_error(script: Path, vsdir, etype, evalue, tb) -> None:
         sys.last_exc = evalue
 
 
+def _stop_tracing(dbg) -> None:
+    """埋め込んだ呼び出しで入れたトレースを、実行の終わりで外す（runcall の後始末と同じ）"""
+    dbg.quitting = True
+    sys.settrace(None)
+    f = sys._getframe()
+    while f is not None:
+        f.f_trace = None
+        if f.f_code is _EXECUTE_CODE:
+            break
+        f = f.f_back
+
+
 def _execute(
-    script: Path, vsdir, run, post_mortem: bool = False, use_breakpoints: bool = True
+    script: Path,
+    vsdir,
+    run,
+    post_mortem: bool = False,
+    use_breakpoints: bool = True,
+    plan: inject.ScriptPlan | None = None,
 ) -> None:
     """赤丸を仕込んだデバッガの下で run() を実行する（スクリプト実行・セル実行の共通部）
 
@@ -506,8 +607,13 @@ def _execute(
     out = out_dir(vsdir)
     start_figure_history(out)
     dbg = VsPdb(script, vsdir, out)
+    dbg.plan = plan
+    inject.install(vsdir)  # import されるファイルの赤丸にも、読み込み時に注入する
+    inject.state.suppress = not use_breakpoints
     if use_breakpoints:
         dbg.sync_breakpoints(force=True)
+    inject.state.dbg = dbg  # 埋め込んだ呼び出しが、この実行のデバッガで止まる
+    # 注入で止める赤丸だけならトレースは入れない（止まった時点で初めて入れる）
     tracing = bool(dbg.breaks)  # {filename: [lines]}
     bps = []
     started = 0.0
@@ -539,6 +645,10 @@ def _execute(
                 file=sys.stderr,
             )
     finally:
+        inject.state.dbg = None
+        inject.state.suppress = False
+        if dbg.hit_used and not tracing:
+            _stop_tracing(dbg)
         if tracing:
             _trace_runs += 1
             trace_done = {
@@ -551,6 +661,9 @@ def _execute(
         dbg.clear_all_breaks()
         notify_figures(out)
         fighist.report_skipped()
+
+
+_EXECUTE_CODE = _execute.__code__
 
 
 def post_mortem_last() -> None:
@@ -588,14 +701,13 @@ def run_script(
     ns.setdefault("__name__", "__main__")
     # dont_inherit: このモジュールの `from __future__ import annotations` をスクリプトへ
     # 持ち込まない（持ち込むと注釈が文字列になり、%run -i と挙動が変わる）
-    code = compile(
-        script.read_text(encoding="utf-8"), str(script), "exec", dont_inherit=True
-    )
+    plan = inject.make_plan(vsdir, script, use_breakpoints)
+    code = plan.compile_script(script.read_text(encoding="utf-8"), str(script))
     fighist.set_label(script.name)
 
     _execute(
         script, vsdir, lambda: _exec_as_script(script, code, ns), post_mortem,
-        use_breakpoints,
+        use_breakpoints, plan,
     )
 
 
@@ -612,7 +724,13 @@ def _exec_as_script(script: Path, code, ns: dict) -> None:
 # ---- セル実行（# %% 区切り / 選択範囲 / 現在行） --------------------------------
 
 
-def compile_range(src: str, start: int, filename: str):
+def compile_range(
+    src: str,
+    start: int,
+    filename: str,
+    plan: inject.ScriptPlan | None = None,
+    full_src: str | None = None,
+):
     """行範囲のソースを「本体」と「末尾の式」に分けてコンパイルする。
 
     - 先頭に空行を詰めて、コード中の行番号をファイル上の行番号に合わせる。
@@ -627,6 +745,9 @@ def compile_range(src: str, start: int, filename: str):
         mod = ast.parse(pad + src, filename, "exec")
     except IndentationError:
         mod = ast.parse(pad + textwrap.dedent(src), filename, "exec")
+
+    if plan is not None:  # 赤丸の呼び出しを埋め込む（末尾の式を切り離す前に）
+        plan.apply_range(mod, start, start + len(src.splitlines()) - 1, full_src)
 
     tail = None
     if mod.body and isinstance(mod.body[-1], ast.Expr):
@@ -653,7 +774,8 @@ def run_cell(
         print(f"ipydesk: file not found: {script}")
         return
 
-    lines = script.read_text(encoding="utf-8").splitlines(keepends=True)
+    full_src = script.read_text(encoding="utf-8")
+    lines = full_src.splitlines(keepends=True)
     start = max(1, start)
     end = min(len(lines), end)
     if start > end:
@@ -662,8 +784,10 @@ def run_cell(
     if not src.strip():
         return
 
+    vsdir = find_vscode_dir(script.parent)
+    plan = inject.make_plan(vsdir, script, use_breakpoints)
     try:
-        code, tail = compile_range(src, start, str(script))
+        code, tail = compile_range(src, start, str(script), plan, full_src)
     except SyntaxError as e:
         print("".join(traceback.format_exception_only(type(e), e)), end="")
         return
@@ -677,7 +801,7 @@ def run_cell(
             sys.displayhook(eval(tail, ns))  # 末尾の式は Out[n] として表示
 
     fighist.set_label(f"{script.name}:{start}-{end}")
-    _execute(script, find_vscode_dir(script.parent), run, post_mortem, use_breakpoints)
+    _execute(script, vsdir, run, post_mortem, use_breakpoints, plan)
 
 
 # ---- IPython 拡張: %ipydesk / %ipydesk_cell マジック ---------------------------------
@@ -745,7 +869,9 @@ class IPyDeskMagics(Magics):
 def load_ipython_extension(ip):
     ip.register_magics(IPyDeskMagics)
 
-    vsdir = out_dir(find_vscode_dir(Path.cwd()))
+    bp_dir = find_vscode_dir(Path.cwd())
+    inject.install(bp_dir)  # import されるファイルの赤丸にも、読み込み時に注入する
+    vsdir = out_dir(bp_dir)
 
     def update_workspace(*_):
         workspace.write(vsdir, ip.user_ns, hidden=ip.user_ns_hidden)
