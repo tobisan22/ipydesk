@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 import traceback
 from bdb import BdbQuit
 from pathlib import Path
@@ -92,6 +93,14 @@ session_file: Path | None = None
 _last_error: tuple | None = None
 error_info: dict | None = None
 
+# 赤丸のトレース（sys.settrace）で実行している間の情報と、直前のトレース実行の結果。
+# どちらも py_session.json に載せて拡張へ知らせる（ステータスバーと低速実行の通知）
+#   trace_info : {"bps": [{"file", "line"}, ...]}。トレース中だけ
+#   trace_done : {"id", "sec", "bps"}。次のトレース実行が始まると消える
+trace_info: dict | None = None
+trace_done: dict | None = None
+_trace_runs = 0
+
 # ブレークポイント・事後デバッグで停止中のデバッガ（Variable Editor がそのフレームの変数を見る）
 active_debugger = None
 
@@ -103,10 +112,20 @@ def out_dir(vscode_dir: Path | None) -> Path | None:
 
 def write_session(busy: bool) -> None:
     """セッション生存通知を書く。busy は「コードを実行中か」— 拡張が F5 の送り先を
-    選ぶのに使う（実行中のセッションへは送らず、別のセッションで実行する）"""
+    選ぶのに使う（実行中のセッションへは送らず、別のセッションで実行する）。
+    trace は実行中にトレースを入れているか（ステータスバーの ⚠）、trace_done は直前の
+    トレース実行の結果（拡張が、遅かったときに通知を出す）"""
     if session_file is None:
         return
-    data = json.dumps({"pid": os.getpid(), "busy": busy, "error": error_info})
+    data = json.dumps(
+        {
+            "pid": os.getpid(),
+            "busy": busy,
+            "error": error_info,
+            "trace": trace_info,
+            "trace_done": trace_done,
+        }
+    )
     tmp = session_file.with_name(session_file.name + ".tmp")
     try:
         tmp.write_text(data, encoding="utf-8")
@@ -259,6 +278,9 @@ class VsPdb(Pdb):
         self.out_dir = out_dir if out_dir is not None else vscode_dir  # 通知の書き出し先
         self.state_file = self.out_dir / STATE_NAME if self.out_dir else None
         self._bp_mtime: float | None = None
+        # co_filename → bdb.breaks のキー（trace_dispatch の近道用）
+        self._canon: dict[str, str] = {}
+        self.loaded: list[dict] = []
 
     def setup(self, f, tb):
         super().setup(f, tb)
@@ -275,6 +297,27 @@ class VsPdb(Pdb):
                     self.curframe_locals = frame.f_locals
                 break
         self._write_state(self.curframe)  # エディタ側で例外行をハイライト
+
+    def trace_dispatch(self, frame, event, arg):
+        # 続行中（stoplineno == -1）に、赤丸のないファイルの関数が呼ばれたときの近道。
+        # bdb の dispatch_call は、SKIP との fnmatch・IPython の隠しフレーム判定
+        # （f_locals の読み取り）・stopframe までのフレーム遡りを呼び出しのたびにやるので、
+        # pandas のように Python の関数を大量に呼ぶコードでは、これだけで数十倍遅くなる。
+        # 辞書を 1 回引いて None を返せば、そのフレームはトレースの対象から外れる。
+        # botframe が決まる前（最初の call）と、ステップ実行中は従来どおりの処理に流す。
+        if (
+            event == "call"
+            and self.stoplineno == -1
+            and self.botframe is not None
+            and not self.quitting
+        ):
+            fn = frame.f_code.co_filename
+            canon = self._canon.get(fn)
+            if canon is None:
+                canon = self._canon[fn] = self.canonic(fn)
+            if canon not in self.breaks:
+                return None
+        return super().trace_dispatch(frame, event, arg)
 
     def stop_here(self, frame):
         # IPython 9 の stop_here は skip 対象モジュールを通過するたびに
@@ -299,12 +342,11 @@ class VsPdb(Pdb):
         self._bp_mtime = mtime
 
         self.clear_all_breaks()
+        self.loaded = []  # 拡張へ知らせる用の、元の綴りのままの {"file", "line"}
         for bp in load_breakpoints(self.vscode_dir):
-            self.set_break(
-                str(Path(bp["file"]).resolve()),
-                bp["line"],
-                cond=bp.get("condition") or None,
-            )
+            file = str(Path(bp["file"]).resolve())
+            self.set_break(file, bp["line"], cond=bp.get("condition") or None)
+            self.loaded.append({"file": file, "line": bp["line"]})
 
     def precmd(self, line: str) -> str:
         self.sync_breakpoints()  # c / n / s 等の直前に最新の赤丸へ揃える
@@ -412,12 +454,20 @@ class VsPdb(Pdb):
 
 
 def load_breakpoints(vscode_dir: Path | None) -> list[dict]:
+    """有効な赤丸の一覧。拡張が「全赤丸を一時無効」にしている間（"active": false）は空。
+
+    ファイルの形は {"active": bool, "breakpoints": [...]}。以前の形（赤丸の配列そのまま）も読める。
+    """
     if vscode_dir is None:
         return []
     bp_file = vscode_dir / BP_NAME
     if not bp_file.exists():
         return []
     raw = json.loads(bp_file.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        if not raw.get("active", True):
+            return []
+        raw = raw.get("breakpoints", [])
     return [b for b in raw if b.get("enabled", True)]
 
 
@@ -441,23 +491,35 @@ def _remember_error(script: Path, vsdir, etype, evalue, tb) -> None:
         sys.last_exc = evalue
 
 
-def _execute(script: Path, vsdir, run, post_mortem: bool = False) -> None:
+def _execute(
+    script: Path, vsdir, run, post_mortem: bool = False, use_breakpoints: bool = True
+) -> None:
     """赤丸を仕込んだデバッガの下で run() を実行する（スクリプト実行・セル実行の共通部）
 
-    赤丸が1つも無ければトレースを一切入れない。例外はトレースバックを出して取っておき、
-    post_mortem=True（Alt+F5）のときだけその場で事後デバッグに入る。
-    それ以外（F5 / セル実行）は止まらず、後から %ipydesk_pm で入れる。
+    赤丸が1つも無ければ（use_breakpoints=False＝赤丸を無視する実行も）トレースを一切入れない。
+    例外はトレースバックを出して取っておき、post_mortem=True（Alt+F5）のときだけ
+    その場で事後デバッグに入る。それ以外（F5 / セル実行）は止まらず、後から %ipydesk_pm で入れる。
     終わったら停止状態と figure 一覧を拡張へ通知する。
     """
-    global _last_error, error_info
+    global _last_error, error_info, trace_info, trace_done, _trace_runs
     _last_error = error_info = None  # 前のエラーは、次の実行を始めた時点で見られなくなる
     out = out_dir(vsdir)
     start_figure_history(out)
     dbg = VsPdb(script, vsdir, out)
-    dbg.sync_breakpoints(force=True)
+    if use_breakpoints:
+        dbg.sync_breakpoints(force=True)
+    tracing = bool(dbg.breaks)  # {filename: [lines]}
+    bps = []
+    started = 0.0
+    if tracing:
+        trace_done = None
+        bps = list(dbg.loaded)
+        trace_info = {"bps": bps}
+        write_session(True)  # 拡張のステータスバーを「トレース中」にする
+        started = time.perf_counter()
 
     try:
-        if dbg.breaks:  # {filename: [lines]}
+        if tracing:
             dbg.runcall(run)
         else:
             run()
@@ -477,6 +539,14 @@ def _execute(script: Path, vsdir, run, post_mortem: bool = False) -> None:
                 file=sys.stderr,
             )
     finally:
+        if tracing:
+            _trace_runs += 1
+            trace_done = {
+                "id": _trace_runs,
+                "sec": round(time.perf_counter() - started, 3),
+                "bps": bps,
+            }
+            trace_info = None
         dbg._clear_state()
         dbg.clear_all_breaks()
         notify_figures(out)
@@ -503,7 +573,9 @@ def post_mortem_last() -> None:
         dbg._clear_state()
 
 
-def run_script(script: Path, ns: dict, post_mortem: bool = False) -> None:
+def run_script(
+    script: Path, ns: dict, post_mortem: bool = False, use_breakpoints: bool = True
+) -> None:
     """VS Code の赤丸で停止しつつ、名前空間 ns でスクリプトを実行する"""
     script = script.resolve()
     if not script.exists():
@@ -521,7 +593,10 @@ def run_script(script: Path, ns: dict, post_mortem: bool = False) -> None:
     )
     fighist.set_label(script.name)
 
-    _execute(script, vsdir, lambda: _exec_as_script(script, code, ns), post_mortem)
+    _execute(
+        script, vsdir, lambda: _exec_as_script(script, code, ns), post_mortem,
+        use_breakpoints,
+    )
 
 
 def _exec_as_script(script: Path, code, ns: dict) -> None:
@@ -561,7 +636,12 @@ def compile_range(src: str, start: int, filename: str):
 
 
 def run_cell(
-    script: Path, start: int, end: int, ns: dict, post_mortem: bool = False
+    script: Path,
+    start: int,
+    end: int,
+    ns: dict,
+    post_mortem: bool = False,
+    use_breakpoints: bool = True,
 ) -> None:
     """script の start..end 行（1 始まり・両端含む）だけを ns で実行する。
 
@@ -597,7 +677,7 @@ def run_cell(
             sys.displayhook(eval(tail, ns))  # 末尾の式は Out[n] として表示
 
     fighist.set_label(f"{script.name}:{start}-{end}")
-    _execute(script, find_vscode_dir(script.parent), run, post_mortem)
+    _execute(script, find_vscode_dir(script.parent), run, post_mortem, use_breakpoints)
 
 
 # ---- IPython 拡張: %ipydesk / %ipydesk_cell マジック ---------------------------------
@@ -612,23 +692,38 @@ def split_pm(line: str) -> tuple[bool, str]:
     return False, line
 
 
+def split_flags(line: str) -> tuple[bool, bool, str]:
+    """先頭の --pm（エラーで止まる）と --nobp（赤丸を無視する）を、順不同で取り出す"""
+    pm = nobp = False
+    while True:
+        line = line.strip()
+        for flag in ("--pm", "--nobp"):
+            if line == flag or line.startswith(flag + " "):
+                line = line[len(flag) :]
+                pm = pm or flag == "--pm"
+                nobp = nobp or flag == "--nobp"
+                break
+        else:
+            return pm, nobp, line
+
+
 @magics_class
 class IPyDeskMagics(Magics):
     @line_magic
     def ipydesk(self, line: str):
-        """%ipydesk [--pm] script.py — 赤丸で停止しつつ、現在の名前空間でスクリプトを実行。
-        --pm を付けるとエラーの行で止まる（事後デバッグ）"""
-        pm, rest = split_pm(line)
+        """%ipydesk [--pm] [--nobp] script.py — 赤丸で停止しつつ、現在の名前空間でスクリプトを実行。
+        --pm を付けるとエラーの行で止まる（事後デバッグ）。--nobp は赤丸を無視する"""
+        pm, nobp, rest = split_flags(line)
         path = rest.strip('"').strip("'")
         if not path:
-            print("usage: %ipydesk [--pm] script.py")
+            print("usage: %ipydesk [--pm] [--nobp] script.py")
             return
-        run_script(Path(path), self.shell.user_ns, post_mortem=pm)
+        run_script(Path(path), self.shell.user_ns, post_mortem=pm, use_breakpoints=not nobp)
 
     @line_magic
     def ipydesk_cell(self, line: str):
         """%ipydesk_cell [--pm] script.py START END — その行範囲だけを現在の名前空間で実行"""
-        pm, rest = split_pm(line)
+        pm, nobp, rest = split_flags(line)
         try:
             head, start, end = rest.rsplit(None, 2)
             span = (int(start), int(end))
@@ -636,7 +731,10 @@ class IPyDeskMagics(Magics):
             print("usage: %ipydesk_cell [--pm] script.py START END")
             return
         path = head.strip().strip('"').strip("'")
-        run_cell(Path(path), span[0], span[1], self.shell.user_ns, post_mortem=pm)
+        run_cell(
+            Path(path), span[0], span[1], self.shell.user_ns,
+            post_mortem=pm, use_breakpoints=not nobp,
+        )
 
     @line_magic
     def ipydesk_pm(self, line: str):

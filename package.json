@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
   "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
   "homepage": "https://github.com/tobisan22/ipydesk#readme",
@@ -29,6 +29,9 @@
       { "command": "ipydesk.run",      "title": "IPyDesk: Run with Breakpoints", "icon": "$(debug-start)" },
       { "command": "ipydesk.runInNewSession", "title": "IPyDesk: Run in New Session", "icon": "$(debug-alt)" },
       { "command": "ipydesk.runStopOnError",  "title": "IPyDesk: Run (Stop on Error)" },
+      { "command": "ipydesk.runWithoutBreakpoints", "title": "IPyDesk: Run Without Breakpoints" },
+      { "command": "ipydesk.toggleAllBreakpoints",  "title": "IPyDesk: Toggle All Breakpoints" },
+      { "command": "ipydesk.showBreakpoints",       "title": "IPyDesk: Show Breakpoints" },
       { "command": "ipydesk.debugLastError",  "title": "IPyDesk: Debug Last Error", "icon": "$(bug)" },
       { "command": "ipydesk.selectSession",   "title": "IPyDesk: Select Session" },
       { "command": "ipydesk.runCell",           "title": "IPyDesk: Run Cell (# %%)" },
@@ -62,6 +65,7 @@
       { "command": "ipydesk.newSession",  "key": "ctrl+shift+f5",  "when": "editorLangId == python" },
       { "command": "ipydesk.runInNewSession", "key": "ctrl+alt+f5", "when": "editorLangId == python && !inDebugMode" },
       { "command": "ipydesk.runStopOnError",  "key": "alt+f5",      "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
+      { "command": "ipydesk.runWithoutBreakpoints", "key": "ctrl+f5", "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
       { "command": "ipydesk.copyFigure", "key": "ctrl+c",       "when": "activeWebviewPanelId == 'ipydeskFigure' || ipydesk.figureActive" }
     ],
     "menus": {
@@ -142,6 +146,12 @@
           "default": 20,
           "minimum": 0,
           "description": "同じ figure を描き直したとき、前の図を Figure タブの上側に残す枚数（figure ごと）。0 で残さない。変更は新しいセッションから有効"
+        },
+        "ipydesk.slowRunNotifySec": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "赤丸のトレースで実行して、これ以上の秒数がかかったときに、赤丸なしでの再実行などを案内する通知を出す。0 で通知しない"
         },
         "ipydesk.showCellDecorations": {
           "type": "boolean",

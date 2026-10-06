@@ -128,6 +128,19 @@ function setClipboardImage(pngPath: string): Promise<void> {
 }
 
 // ---- 赤丸の書き出し ----------------------------------------------------------
+// 「すべての赤丸を一時的に無効にする」状態。VS Code には全赤丸の無効状態を読む API が
+// ないので、拡張の workspaceState に持ち、py_breakpoints.json に "active" として書く。
+// 個々の赤丸の enabled は変更しない
+const BP_ACTIVE_KEY = "ipydesk.breakpointsActive";
+let bpActive = true;
+
+/** 有効な .py の赤丸（個別に無効なものは除く） */
+function enabledBreakpoints(): vscode.SourceBreakpoint[] {
+  return vscode.debug.breakpoints
+    .filter((b): b is vscode.SourceBreakpoint => b instanceof vscode.SourceBreakpoint)
+    .filter(b => b.enabled && b.location.uri.fsPath.endsWith(".py"));
+}
+
 function dumpBreakpoints() {
   const dir = vscodeDir();
   if (!dir) { return; }
@@ -141,7 +154,8 @@ function dumpBreakpoints() {
       condition: b.condition ?? null,
     }));
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, BP_NAME), JSON.stringify(bps, null, 2), "utf8");
+  fs.writeFileSync(path.join(dir, BP_NAME),
+    JSON.stringify({ active: bpActive, breakpoints: bps }, null, 2), "utf8");
 }
 
 // ---- セル（`# %%` / `#%%` 区切り）---------------------------------------------
@@ -195,9 +209,14 @@ export function activate(context: vscode.ExtensionContext) {
     closedIds: Set<string>;                        // タブを閉じた figure の実体（Python が閉じるまで開き直さない）
     ws: WsData | null;                             // 最後に受け取った変数一覧
     error?: ErrInfo;                               // 直前の実行のエラー（次の実行で消える）
+    trace?: BpLoc[];                               // 赤丸のトレースで実行中なら、その赤丸（ステータスバーの ⚠）
+    lastRun?: { script: string; cell?: { start: number; end: number } };   // 直前に送った実行
+    traceNotified?: number;                        // 低速実行の通知を出した trace_done.id
     lastUsed: number;
   }
   type ErrInfo = { type: string; where: string | null };
+  type BpLoc = { file: string; line: number };
+  type TraceDone = { id: number; sec: number; bps: BpLoc[] };
   const sessions = new Map<number, Session>();
   let activeId: number | undefined;
   let activeFigure: { sid: number; num: number } | undefined;   // 最後にフォーカスされた figure
@@ -280,9 +299,39 @@ export function activate(context: vscode.ExtensionContext) {
   const errStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
   errStatus.command = "ipydesk.debugLastError";
   errStatus.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
-  context.subscriptions.push(status, errStatus);
+  // 赤丸の状態: ● BP n（有効な赤丸がある）/ ⚠ BP トレース中（実行中で遅い）/ ○ BP 無効
+  const bpStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+  bpStatus.command = "ipydesk.showBreakpoints";
+  context.subscriptions.push(status, errStatus, bpStatus);
+  bpActive = context.workspaceState.get<boolean>(BP_ACTIVE_KEY, true);
+
+  const updateBpStatus = () => {
+    const a = active();
+    const n = enabledBreakpoints().length;
+    if (a?.trace && a.trace.length > 0) {
+      bpStatus.text = "$(warning) BP トレース中";
+      bpStatus.tooltip = "赤丸のため、トレースを入れて実行中です（通常より遅くなります）。"
+        + "クリックで赤丸の一覧を表示";
+      bpStatus.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      bpStatus.show();
+    } else if (!bpActive) {
+      bpStatus.text = "$(circle-outline) BP 無効";
+      bpStatus.tooltip = "すべての赤丸を一時的に無効にしています（クリックで一覧・再開）";
+      bpStatus.backgroundColor = undefined;
+      bpStatus.show();
+    } else if (n > 0) {
+      bpStatus.text = `$(circle-filled) BP ${n}`;
+      bpStatus.tooltip = "赤丸があると、実行はトレース付きになり遅くなることがあります。"
+        + "クリックで赤丸の一覧を表示（Ctrl+F5 は赤丸を無視して実行）";
+      bpStatus.backgroundColor = undefined;
+      bpStatus.show();
+    } else {
+      bpStatus.hide();
+    }
+  };
 
   const updateStatus = () => {
+    updateBpStatus();
     const a = active();
     const n = sessions.size;
     if (a?.stopped) {
@@ -659,7 +708,8 @@ export function activate(context: vscode.ExtensionContext) {
 
   // ---- セッション ----
   const readSession = (s: Session):
-    { pid: number; busy?: boolean; error?: ErrInfo | null } | undefined => {
+    { pid: number; busy?: boolean; error?: ErrInfo | null;
+      trace?: { bps: BpLoc[] } | null; trace_done?: TraceDone | null } | undefined => {
     try {
       return JSON.parse(fs.readFileSync(path.join(s.dir, SESSION_NAME), "utf8"));
     } catch {
@@ -812,21 +862,23 @@ export function activate(context: vscode.ExtensionContext) {
   // セッションが押した回数だけ増えないようにする
   let starting = false;
   const startSession = async (
-    scriptPath?: string, cell?: { start: number; end: number }, id?: number, pm = false) => {
+    scriptPath?: string, cell?: { start: number; end: number }, id?: number, pm = false,
+    noBp = false) => {
     if (starting) {
       vscode.window.setStatusBarMessage("IPyDesk: セッションを起動中です", 3000);
       return;
     }
     starting = true;
     try {
-      await launchSession(scriptPath, cell, id, pm);
+      await launchSession(scriptPath, cell, id, pm, noBp);
     } finally {
       starting = false;
     }
   };
 
   const launchSession = async (
-    scriptPath?: string, cell?: { start: number; end: number }, id?: number, pm = false) => {
+    scriptPath?: string, cell?: { start: number; end: number }, id?: number, pm = false,
+    noBp = false) => {
     // ほかのセッションが動いていればそのログは残す
     const lp = extLogPath();
     if (lp && sessions.size === 0) { try { fs.writeFileSync(lp, ""); } catch { /* ignore */ } }
@@ -900,6 +952,7 @@ export function activate(context: vscode.ExtensionContext) {
       ...(scriptPath ? [scriptPath] : []),
       ...(scriptPath && cell ? ["--cell", String(cell.start), String(cell.end)] : []),
       ...(scriptPath && pm ? ["--pm"] : []),
+      ...(scriptPath && noBp ? ["--nobp"] : []),
     ];
     extLog(`SESSION launch ${probe.exe} ${args.join(" ")}`);
     // isTransient: VS Code のターミナル永続化（terminal.integrated.enablePersistentSessions）
@@ -912,6 +965,7 @@ export function activate(context: vscode.ExtensionContext) {
     const s: Session = {
       id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), closedIds: new Set(), ws: null,
       lastUsed: Date.now(),
+      lastRun: scriptPath ? { script: scriptPath, cell } : undefined,
     };
     sessions.set(sid, s);
     activeId = sid;
@@ -936,7 +990,8 @@ export function activate(context: vscode.ExtensionContext) {
    * pm（Alt+F5）ならエラーの行で止まる。F5 / セル実行は止まらない
    */
   const dispatch = async (
-    scriptPath: string, cell?: { start: number; end: number }, forceNew = false, pm = false) => {
+    scriptPath: string, cell?: { start: number; end: number }, forceNew = false, pm = false,
+    noBp = false) => {
     const a = active();
     const target = forceNew ? undefined : pickSession();
     if (!forceNew && a && target !== a && isAlive(a)) {
@@ -945,14 +1000,15 @@ export function activate(context: vscode.ExtensionContext) {
         + ` ${target?.name ?? "新しいセッション"} で実行します`, 4000);
     }
     if (!target) {
-      await startSession(scriptPath, cell, undefined, pm);
+      await startSession(scriptPath, cell, undefined, pm, noBp);
       return;
     }
     setActive(target);
     target.error = undefined;   // 実行を始めた時点で前のエラーには入れなくなる
+    target.lastRun = { script: scriptPath, cell };
     updateStatus();
     target.terminal.show(true);
-    const opt = pm ? "--pm " : "";
+    const opt = (pm ? "--pm " : "") + (noBp ? "--nobp " : "");
     target.terminal.sendText(cell
       ? `%ipydesk_cell ${opt}"${scriptPath}" ${cell.start} ${cell.end}`
       : `%ipydesk ${opt}"${scriptPath}"`);
@@ -960,7 +1016,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   // ---- 赤丸 ----
   dumpBreakpoints();
-  context.subscriptions.push(vscode.debug.onDidChangeBreakpoints(dumpBreakpoints));
+  context.subscriptions.push(vscode.debug.onDidChangeBreakpoints(() => {
+    dumpBreakpoints();
+    updateBpStatus();
+  }));
 
   // ---- セル / 選択範囲の実行 ----
   const pythonEditor = (): vscode.TextEditor | undefined => {
@@ -1097,7 +1156,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   // ---- コマンド: 実行系 ----
-  const runFile = (forceNew: boolean, pm = false) => async () => {
+  const runFile = (forceNew: boolean, pm = false, noBp = false) => async () => {
     trackCodeEditor(vscode.window.activeTextEditor);
     const doc = vscode.window.activeTextEditor?.document;
     if (!doc || doc.languageId !== "python") {
@@ -1105,13 +1164,97 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
     await doc.save();
-    await dispatch(doc.uri.fsPath, undefined, forceNew, pm);
+    await dispatch(doc.uri.fsPath, undefined, forceNew, pm, noBp);
+  };
+
+  // ---- 赤丸の一時無効・一覧・低速実行の通知 ----
+  const locLabel = (b: BpLoc) => `${path.basename(b.file)}:${b.line}`;
+
+  const setBpActive = async (v: boolean) => {
+    bpActive = v;
+    await context.workspaceState.update(BP_ACTIVE_KEY, v);
+    dumpBreakpoints();
+    updateStatus();
+    vscode.window.setStatusBarMessage(
+      v ? "IPyDesk: 赤丸を有効に戻しました" : "IPyDesk: すべての赤丸を一時的に無効にしました", 3000);
+  };
+
+  /** 赤丸を 1 つ無効にする（VS Code に enabled を直接変える API はないので、作り直す） */
+  const disableBreakpoint = (loc: BpLoc) => {
+    const f = loc.file.toLowerCase();
+    const hit = enabledBreakpoints().find(b =>
+      b.location.uri.fsPath.toLowerCase() === f && b.location.range.start.line + 1 === loc.line);
+    if (!hit) { return; }
+    vscode.debug.removeBreakpoints([hit]);
+    vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(
+      hit.location, false, hit.condition, hit.hitCondition, hit.logMessage)]);
+  };
+
+  const openLoc = async (loc: BpLoc) => {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(loc.file));
+    const pos = new vscode.Position(Math.max(0, loc.line - 1), 0);
+    await vscode.window.showTextDocument(doc, { selection: new vscode.Range(pos, pos) });
+  };
+
+  const showBreakpoints = async () => {
+    const a = active();
+    const traced = a?.trace ?? [];
+    const toLoc = (b: vscode.SourceBreakpoint): BpLoc =>
+      ({ file: b.location.uri.fsPath, line: b.location.range.start.line + 1 });
+    const locs = traced.length > 0 ? traced : enabledBreakpoints().map(toLoc);
+    type Item = vscode.QuickPickItem & { loc?: BpLoc; toggle?: boolean };
+    const items: Item[] = [
+      {
+        label: bpActive ? "$(circle-slash) すべての赤丸を一時的に無効にする" : "$(circle-filled) 赤丸を有効に戻す",
+        toggle: true,
+      },
+      { label: traced.length > 0 ? "トレースの原因になっている赤丸" : "有効な赤丸", kind: vscode.QuickPickItemKind.Separator },
+      ...locs.map(l => ({ label: locLabel(l), description: path.dirname(l.file), loc: l })),
+    ];
+    if (locs.length === 0) { items.push({ label: "（有効な赤丸はありません）" }); }
+    const pick = await vscode.window.showQuickPick(items, {
+      title: "IPyDesk: 赤丸",
+      placeHolder: bpActive ? "選ぶと赤丸の位置を開きます" : "赤丸は一時的に無効です",
+    });
+    if (pick?.toggle) { await setBpActive(!bpActive); }
+    else if (pick?.loc) { await openLoc(pick.loc); }
+  };
+
+  /** トレース付きの実行が遅かったときに、回避の手段を出す */
+  const notifySlowRun = async (s: Session, done: TraceDone) => {
+    const limit = config().get<number>("slowRunNotifySec", 5);
+    if (limit <= 0 || done.sec < limit || s.traceNotified === done.id) { return; }
+    s.traceNotified = done.id;
+    const first = done.bps[0];
+    const where = first ? `${locLabel(first)}${done.bps.length > 1 ? ` ほか ${done.bps.length - 1} 個` : ""}` : "";
+    const REPLAY = "赤丸なしで再実行", DISABLE = "この赤丸を無効化", NEWSESS = "新しいセッションで実行";
+    const pick = await vscode.window.showInformationMessage(
+      `IPyDesk: 赤丸（${where}）のため、トレース付きの低速モードで実行しました（${done.sec.toFixed(1)} 秒）`,
+      REPLAY, DISABLE, NEWSESS);
+    const run = s.lastRun;
+    if (pick === REPLAY && run) {
+      await dispatch(run.script, run.cell, false, false, true);
+    } else if (pick === NEWSESS && run) {
+      await dispatch(run.script, run.cell, true);
+    } else if (pick === DISABLE) {
+      let targets = done.bps;
+      if (targets.length > 1) {
+        const sel = await vscode.window.showQuickPick(
+          targets.map(l => ({ label: locLabel(l), description: path.dirname(l.file), loc: l })),
+          { title: "無効にする赤丸", canPickMany: true });
+        targets = sel?.map(x => x.loc) ?? [];
+      }
+      targets.forEach(disableBreakpoint);
+    }
   };
 
   context.subscriptions.push(
     vscode.commands.registerCommand("ipydesk.run", runFile(false)),
     vscode.commands.registerCommand("ipydesk.runInNewSession", runFile(true)),
     vscode.commands.registerCommand("ipydesk.runStopOnError", runFile(false, true)),
+    vscode.commands.registerCommand("ipydesk.runWithoutBreakpoints", runFile(false, false, true)),
+    vscode.commands.registerCommand("ipydesk.toggleAllBreakpoints", () => setBpActive(!bpActive)),
+    vscode.commands.registerCommand("ipydesk.showBreakpoints", showBreakpoints),
 
     // 直前の実行のエラーの行に入る（F5 / セル実行はエラーで止まらないので、後から入る）
     vscode.commands.registerCommand("ipydesk.debugLastError", () => {
@@ -1268,9 +1411,12 @@ export function activate(context: vscode.ExtensionContext) {
     const s = byUri(uri);
     if (!s) { return; }
     const info = readSession(s);
-    if (!info || info.busy) { return; }   // 実行中は前のエラーを出さない（ほぼ消えている）
+    if (!info) { return; }
+    s.trace = info.busy ? info.trace?.bps : undefined;
+    if (info.busy) { updateStatus(); return; }   // 実行中は前のエラーを出さない（ほぼ消えている）
     s.error = info.error ?? undefined;
     updateStatus();
+    if (info.trace_done) { void notifySlowRun(s, info.trace_done); }
   };
   const sessionWatcher = vscode.workspace.createFileSystemWatcher(sessionGlob(SESSION_NAME));
   sessionWatcher.onDidCreate(onSessionFile);

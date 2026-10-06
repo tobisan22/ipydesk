@@ -80,6 +80,7 @@ def startup_lines(
     script: str | Path | None,
     cell: tuple[int, int] | None = None,
     post_mortem: bool = False,
+    no_breakpoints: bool = False,
 ) -> list[str]:
     """IPython の exec_lines を組む。
 
@@ -113,7 +114,7 @@ def startup_lines(
     else:
         lines.append(f"%matplotlib {mpl}")
     lines += ["%load_ext autoreload", "%autoreload 2"]
-    pm = "--pm " if post_mortem else ""
+    pm = ("--pm " if post_mortem else "") + ("--nobp " if no_breakpoints else "")
     if script and cell:
         lines.append(f'%ipydesk_cell {pm}"{script}" {cell[0]} {cell[1]}')
     elif script:
@@ -175,7 +176,8 @@ def ipython_config() -> Config:
 def main() -> None:
     argv = sys.argv[1:]
     post_mortem = "--pm" in argv  # 位置は問わない（parse_args は従来の形のまま）
-    script, cell = parse_args([a for a in argv if a != "--pm"])
+    no_bp = "--nobp" in argv
+    script, cell = parse_args([a for a in argv if a not in ("--pm", "--nobp")])
 
     # --- セッション生存通知（拡張側が「2回目以降は %ipydesk を送る」判定に使う） ---
     vsdir = find_vscode_dir(script.parent if script else Path.cwd())
@@ -198,7 +200,7 @@ def main() -> None:
     # --- IPython 設定 ---
     mpl = resolve_backend(os.environ.get("IPYDESK_MPL", "webagg").lower())
     port = int(os.environ.get("IPYDESK_PORT", "8988"))
-    exec_lines = startup_lines(mpl, port, script, cell, post_mortem)
+    exec_lines = startup_lines(mpl, port, script, cell, post_mortem, no_bp)
 
     c = ipython_config()
 
