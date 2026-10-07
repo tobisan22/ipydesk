@@ -5,6 +5,7 @@
 src/**
 scripts/**
 docs/**
+仕様書/**
 _to_delete/**
 .gitignore
 .gitattributes
