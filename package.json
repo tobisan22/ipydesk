@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
   "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
   "homepage": "https://github.com/tobisan22/ipydesk#readme",

@@ -425,6 +425,15 @@ class VsPdb(Pdb):
         self.hit_used = True
         self._from_hit = True
         try:
+            # トレース経由の赤丸でトレースが入ったままだと、reset / set_step の中の bdb 自身の
+            # 関数（_set_stopinfo など）が step 対象になり、bdb.py の中で止まってしまう。
+            # 先にトレースを外し、ここまでの呼び出し（stop_at / inject_hit / bp_hit）の
+            # フレームに残った f_trace も外す（あとで settrace し直したときに呼ばれないように）
+            sys.settrace(None)
+            g = sys._getframe()
+            while g is not None and g is not frame:
+                g.f_trace = None
+                g = g.f_back
             self.reset()
             f = frame
             while f is not None:  # _execute より外（IPython 本体）にはトレースを広げない

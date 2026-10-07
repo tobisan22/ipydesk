@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-07
+
+### Fixed
+
+- `ipydesk.breakpointMode` を `inject` にしたとき、読み込み済みモジュールの赤丸（トレースで止まるもの）と、実行中のスクリプトの赤丸が同じ実行にあると、スクリプトの赤丸で `bdb.py` の中に止まってしまう問題を直しました。続行（F5）してもスクリプトの行に戻れず、終了でしか抜けられませんでした。
+
 ## [0.1.0] - 2026-10-07
 
 ### Added

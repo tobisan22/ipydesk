@@ -267,6 +267,31 @@ def test_already_imported_module_falls_back_to_tracing(ws, hits):
     assert core.trace_done is not None and core.trace_done["bps"][0]["line"] == 2
 
 
+def test_traced_and_injected_breakpoints_in_one_run_stop_only_in_user_code(ws, monkeypatch):
+    """B1: トレース経由の赤丸（import 済み）が先に止まったあと、注入の赤丸で bdb.py の中に止まらない"""
+    mod = write(ws, "tracedmod.py", "def inc(x):\n    y = x + 1\n    return y\n")
+    script = write(
+        ws, "main.py", "import tracedmod\nr = tracedmod.inc(1)\nq = 5\nw = 6\n"
+    )
+    set_bps(ws)
+    core.run_script(script, {})  # 赤丸なしで 1 回目の import（以降はトレース経路）
+    set_bps(ws, (mod, 2), (script, 4))
+    stops = []
+
+    def interaction(self, frame, tb_or_exc):
+        if frame is None:
+            return
+        stops.append((Path(frame.f_code.co_filename).name, frame.f_lineno))
+        self.set_continue()
+
+    monkeypatch.setattr(core.VsPdb, "interaction", interaction)
+    ns = {}
+    core.run_script(script, ns)
+    assert stops == [("tracedmod.py", 2), ("main.py", 4)]
+    assert ns["w"] == 6
+    assert sys.gettrace() is None
+
+
 def test_module_reload_picks_up_a_new_breakpoint(ws, hits):
     """autoreload のように、実行の外で読み直されても注入される（Finder は入れっぱなし）"""
     import importlib
