@@ -151,10 +151,10 @@
           "type": "string",
           "enum": ["inject", "trace"],
           "enumDescriptions": [
-            "赤丸の行に「止まるための呼び出し」を埋め込んで実行する。止まるまで速度が落ちない（既定）",
-            "従来のトレース（sys.settrace）で止める。遅くなるが、埋め込みで問題が出たときの戻し先"
+            "赤丸の行に「止まるための呼び出し」を埋め込んで実行する。止まるまで速度が落ちない（試験的）",
+            "従来のトレース（sys.settrace）で止める。赤丸があると遅くなるが、実績のある方式（既定）"
           ],
-          "default": "inject",
+          "default": "trace",
           "description": "赤丸で止まる方式。変更は次の実行から有効"
         },
         "ipydesk.slowRunNotifySec": {

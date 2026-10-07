@@ -86,14 +86,14 @@ def read_bp_file(vscode_dir: Path | None) -> tuple[str, list[dict]]:
     以前の形（赤丸の配列そのまま）も読める。
     """
     if vscode_dir is None:
-        return "inject", []
+        return "trace", []
     bp_file = vscode_dir / BP_NAME
     if not bp_file.exists():
-        return "inject", []
+        return "trace", []
     raw = json.loads(bp_file.read_text(encoding="utf-8"))
-    mode = "inject"
+    mode = "trace"
     if isinstance(raw, dict):
-        mode = raw.get("mode", "inject")
+        mode = raw.get("mode", "trace")
         if not raw.get("active", True):
             return mode, []
         raw = raw.get("breakpoints", [])
@@ -378,7 +378,10 @@ class _Finder(importlib.abc.MetaPathFinder):
 
 
 def install(vscode_dir: Path | None) -> None:
-    """赤丸 JSON の場所を決め、import 時の注入を有効にする（何度呼んでもよい）"""
+    """赤丸 JSON の場所を決め、import 時の注入を有効にする（何度呼んでもよい）。
+    trace 方式の間は Finder を入れない（実行のたびに呼ばれるので、inject に切り替えた次の実行で入る）"""
     state.vscode_dir = vscode_dir
+    if read_bp_file(vscode_dir)[0] != "inject":
+        return
     if not any(isinstance(f, _Finder) for f in sys.meta_path):
         sys.meta_path.insert(0, _Finder())

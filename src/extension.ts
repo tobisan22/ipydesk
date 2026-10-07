@@ -143,8 +143,8 @@ function enabledBreakpoints(): vscode.SourceBreakpoint[] {
 
 /** 赤丸の方式。inject: 赤丸の行に止まる呼び出しを埋め込む（速い）/ trace: 従来のトレース */
 function breakpointMode(): "inject" | "trace" {
-  return vscode.workspace.getConfiguration("ipydesk").get<string>("breakpointMode") === "trace"
-    ? "trace" : "inject";
+  return vscode.workspace.getConfiguration("ipydesk").get<string>("breakpointMode") === "inject"
+    ? "inject" : "trace";
 }
 
 function dumpBreakpoints() {
