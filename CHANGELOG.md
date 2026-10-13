@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- スクリプト引数（`sys.argv`）に対応しました。`IPyDesk: Run with Arguments…` / `IPyDesk: Set Arguments…` で引数を設定すると、F5・セル実行・選択範囲の実行のすべてで同じ引数が使われます。ステータスバーに今の引数が表示されます。端末では `%ipydesk x.py -- --n 10` の形でも渡せます。
+
+### Changed
+
+- `%ipydesk` / `%ipydesk_cell` は `$var` / `{expr}` を展開しなくなりました（引数をそのまま渡すため）。
+
 ## [0.1.1] - 2026-10-07
 
 ### Fixed

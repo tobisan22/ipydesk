@@ -28,6 +28,8 @@
     "commands": [
       { "command": "ipydesk.run",      "title": "IPyDesk: Run with Breakpoints", "icon": "$(debug-start)" },
       { "command": "ipydesk.runInNewSession", "title": "IPyDesk: Run in New Session", "icon": "$(debug-alt)" },
+      { "command": "ipydesk.runWithArgs", "title": "IPyDesk: Run with Arguments…", "icon": "$(debug-start)" },
+      { "command": "ipydesk.setArgs",     "title": "IPyDesk: Set Arguments…",      "icon": "$(symbol-parameter)" },
       { "command": "ipydesk.runStopOnError",  "title": "IPyDesk: Run (Stop on Error)" },
       { "command": "ipydesk.runWithoutBreakpoints", "title": "IPyDesk: Run Without Breakpoints" },
       { "command": "ipydesk.toggleAllBreakpoints",  "title": "IPyDesk: Toggle All Breakpoints" },
@@ -87,7 +89,8 @@
       ],
       "editor/title/run": [
         { "command": "ipydesk.run", "when": "editorLangId == python", "group": "navigation@0" },
-        { "command": "ipydesk.runInNewSession", "when": "editorLangId == python", "group": "navigation@1" }
+        { "command": "ipydesk.runInNewSession", "when": "editorLangId == python", "group": "navigation@1" },
+        { "command": "ipydesk.runWithArgs", "when": "editorLangId == python", "group": "navigation@2" }
       ],
       "editor/title": [
         { "command": "ipydesk.stop",     "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@0" },

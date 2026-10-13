@@ -1,13 +1,16 @@
 """
-python -m ipydesk [script.py] [--cell START END] [--pm]
+python -m ipydesk [script.py] [--cell START END] [--pm] [--nobp] [-- args...]
 
 IPython セッションを起動し、%ipydesk / %ipydesk_cell マジックを登録する。
 script.py が渡されていれば起動直後にそれを実行し、終了後もセッションを維持する。
 --cell を付けると、スクリプト全体ではなくその行範囲（1 始まり・両端含む）だけを実行する。
 VS Code からセル実行したときに、セッションがまだ無い場合の起動で使われる。
 --pm を付けると、その最初の実行でエラーが出たときにその行で止まる（VS Code の Alt+F5）。
+-- の後ろはスクリプトの引数（sys.argv[1:]）になる。VS Code 拡張は、シェルを挟まず起動する
+ため、引数の生の文字列を環境変数 IPYDESK_ARGS で渡す（書き方は %ipydesk の行と同じ）。
 
 環境変数:
+  IPYDESK_ARGS  最初の実行に渡すスクリプト引数の生の文字列（読み取ったら環境から消す）
   IPYDESK_MPL   matplotlib バックエンド (既定 "webagg")。"qt", "tk", "inline",
              "none"（表示しない = Agg。webagg サーバーもポートも使わない）、
              および "auto"（Qt → Tk → webagg の順に、入っているものを選ぶ）。
@@ -81,6 +84,7 @@ def startup_lines(
     cell: tuple[int, int] | None = None,
     post_mortem: bool = False,
     no_breakpoints: bool = False,
+    args: str = "",
 ) -> list[str]:
     """IPython の exec_lines を組む。
 
@@ -115,15 +119,40 @@ def startup_lines(
         lines.append(f"%matplotlib {mpl}")
     lines += ["%load_ext autoreload", "%autoreload 2"]
     pm = ("--pm " if post_mortem else "") + ("--nobp " if no_breakpoints else "")
+    tail = f" -- {args}" if args else ""
     if script and cell:
-        lines.append(f'%ipydesk_cell {pm}"{script}" {cell[0]} {cell[1]}')
+        lines.append(f'%ipydesk_cell {pm}"{script}" {cell[0]} {cell[1]}{tail}')
     elif script:
-        lines.append(f'%ipydesk {pm}"{script}"')
+        lines.append(f'%ipydesk {pm}"{script}"{tail}')
     return lines
 
 
-def parse_args(argv: list[str]) -> tuple[Path | None, tuple[int, int] | None]:
-    """[script.py] [--cell START END] を (script, cell) に分解する"""
+def join_args(args: list[str]) -> str:
+    """引数のリストを、core.split_args で元に戻せる生の文字列にする。
+
+    空白・引用符を含まない要素はそのまま、含む要素は '…'（' を含めば "…"）で囲む。
+    ' と " の両方を含む要素は書けないので ValueError
+    """
+    out = []
+    for a in args:
+        if a and not any(c.isspace() or c in "\"'" for c in a):
+            out.append(a)
+        elif "'" not in a:
+            out.append(f"'{a}'")
+        elif '"' not in a:
+            out.append(f'"{a}"')
+        else:
+            raise ValueError(a)
+    return " ".join(out)
+
+
+def parse_args(argv: list[str]) -> tuple[Path | None, tuple[int, int] | None, str]:
+    """[script.py] [--cell START END] [-- args...] を (script, cell, 引数の生の文字列) に分解する"""
+    script_args: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, script_args = argv[:i], argv[i + 1 :]
+    argv = [a for a in argv if a not in ("--pm", "--nobp")]
     cell: tuple[int, int] | None = None
     if "--cell" in argv:
         i = argv.index("--cell")
@@ -134,7 +163,15 @@ def parse_args(argv: list[str]) -> tuple[Path | None, tuple[int, int] | None]:
             cell = None
         argv = argv[:i] + argv[i + 3 :]
     script = Path(argv[0]).resolve() if argv else None
-    return script, cell
+    kept: list[str] = []
+    for a in script_args:
+        try:
+            join_args([a])
+        except ValueError:
+            print(f"[ipydesk] 警告: ' と \" の両方を含む引数は渡せないため除きます: {a}")
+            continue
+        kept.append(a)
+    return script, cell, join_args(kept)
 
 
 class IPyDeskApp(TerminalIPythonApp):
@@ -175,9 +212,12 @@ def ipython_config() -> Config:
 
 def main() -> None:
     argv = sys.argv[1:]
-    post_mortem = "--pm" in argv  # 位置は問わない（parse_args は従来の形のまま）
-    no_bp = "--nobp" in argv
-    script, cell = parse_args([a for a in argv if a not in ("--pm", "--nobp")])
+    own = argv[: argv.index("--")] if "--" in argv else argv  # -- より後ろはスクリプトの引数
+    post_mortem = "--pm" in own  # 位置は問わない
+    no_bp = "--nobp" in own
+    script, cell, args = parse_args(argv)
+    env_args = os.environ.pop("IPYDESK_ARGS", "")  # 子プロセスへ引き継がない
+    args = args or " ".join(env_args.split())
 
     # --- セッション生存通知（拡張側が「2回目以降は %ipydesk を送る」判定に使う） ---
     vsdir = find_vscode_dir(script.parent if script else Path.cwd())
@@ -200,7 +240,7 @@ def main() -> None:
     # --- IPython 設定 ---
     mpl = resolve_backend(os.environ.get("IPYDESK_MPL", "webagg").lower())
     port = int(os.environ.get("IPYDESK_PORT", "8988"))
-    exec_lines = startup_lines(mpl, port, script, cell, post_mortem, no_bp)
+    exec_lines = startup_lines(mpl, port, script, cell, post_mortem, no_bp, args)
 
     c = ipython_config()
 

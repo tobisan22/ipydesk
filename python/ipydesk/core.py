@@ -20,12 +20,15 @@ import ast
 import fnmatch
 import json
 import os
+import re
+import shlex
 import sys
 import textwrap
 import time
 import traceback
 from bdb import BdbQuit
 from pathlib import Path
+from typing import Sequence
 
 from . import fighist, inject, varview, workspace
 
@@ -696,7 +699,11 @@ def post_mortem_last() -> None:
 
 
 def run_script(
-    script: Path, ns: dict, post_mortem: bool = False, use_breakpoints: bool = True
+    script: Path,
+    ns: dict,
+    post_mortem: bool = False,
+    use_breakpoints: bool = True,
+    argv: Sequence[str] = (),
 ) -> None:
     """VS Code の赤丸で停止しつつ、名前空間 ns でスクリプトを実行する"""
     script = script.resolve()
@@ -715,15 +722,15 @@ def run_script(
     fighist.set_label(script.name)
 
     _execute(
-        script, vsdir, lambda: _exec_as_script(script, code, ns), post_mortem,
+        script, vsdir, lambda: _exec_as_script(script, code, ns, argv), post_mortem,
         use_breakpoints, plan,
     )
 
 
-def _exec_as_script(script: Path, code, ns: dict) -> None:
-    """%run -i と同じく、実行中だけ sys.argv をスクリプト名にして ns で実行する"""
+def _exec_as_script(script: Path, code, ns: dict, argv: Sequence[str] = ()) -> None:
+    """%run -i と同じく、実行中だけ sys.argv を [スクリプト名, *argv] にして ns で実行する"""
     saved = sys.argv
-    sys.argv = [str(script)]
+    sys.argv = [str(script), *argv]
     try:
         exec(code, ns)
     finally:
@@ -772,6 +779,7 @@ def run_cell(
     ns: dict,
     post_mortem: bool = False,
     use_breakpoints: bool = True,
+    argv: Sequence[str] = (),
 ) -> None:
     """script の start..end 行（1 始まり・両端含む）だけを ns で実行する。
 
@@ -805,7 +813,7 @@ def run_cell(
     ns.setdefault("__name__", "__main__")
 
     def run():
-        _exec_as_script(script, code, ns)
+        _exec_as_script(script, code, ns, argv)
         if tail is not None:
             sys.displayhook(eval(tail, ns))  # 末尾の式は Out[n] として表示
 
@@ -814,7 +822,7 @@ def run_cell(
 
 
 # ---- IPython 拡張: %ipydesk / %ipydesk_cell マジック ---------------------------------
-from IPython.core.magic import Magics, line_magic, magics_class
+from IPython.core.magic import Magics, line_magic, magics_class, no_var_expand
 
 
 def split_pm(line: str) -> tuple[bool, str]:
@@ -840,33 +848,99 @@ def split_flags(line: str) -> tuple[bool, bool, str]:
             return pm, nobp, line
 
 
+_ARGS_SEP = re.compile(r"(?:^|\s)--(?=\s|$)")
+
+
+def split_args(raw: str) -> list[str]:
+    """スクリプト引数の生の文字列を分割する。
+
+    空白区切り・"…" / '…' でまとめる。バックスラッシュは普通の文字（Windows のパスが
+    そのまま書ける）、# はコメントではなく、$x / {x} は展開しない。
+    引用符が閉じていなければ ValueError。
+    """
+    lex = shlex.shlex(raw, posix=True)
+    lex.whitespace_split = True
+    lex.escape = ""
+    lex.commenters = ""
+    try:
+        return list(lex)
+    except ValueError as e:
+        raise ValueError(f"引数の引用符が閉じていません: {raw}") from e
+
+
+def split_target(rest: str) -> tuple[str, str]:
+    """split_flags の残りを「-- より前」と「-- より後ろの生の文字列」に分ける。
+
+    先頭が引用符なら閉じ引用符までを読み飛ばしてから -- を探す
+    （パスに ' -- ' が含まれても誤認しない）。
+    """
+    rest = rest.strip()
+    head = ""
+    tail = rest
+    if rest[:1] in ('"', "'"):
+        end = rest.find(rest[0], 1)
+        if end != -1:
+            head, tail = rest[: end + 1], rest[end + 1 :]
+    m = _ARGS_SEP.search(tail)
+    if not m:
+        return rest, ""
+    return (head + tail[: m.start()]).strip(), tail[m.end() :].strip()
+
+
+def _parse_target(line: str):
+    """pm, nobp, (-- より前), argv を返す。引用符エラーは表示して None"""
+    pm, nobp, rest = split_flags(line)
+    before, raw = split_target(rest)
+    try:
+        argv = split_args(raw) if raw else []
+    except ValueError as e:
+        print(f"[ipydesk] {e}")
+        return None
+    if argv:
+        print(f"[ipydesk] argv: {argv}")
+    return pm, nobp, before, argv
+
+
 @magics_class
 class IPyDeskMagics(Magics):
+    # $x / {expr} を IPython に展開させない（引数にそのまま渡すため）
+    @no_var_expand
     @line_magic
     def ipydesk(self, line: str):
-        """%ipydesk [--pm] [--nobp] script.py — 赤丸で停止しつつ、現在の名前空間でスクリプトを実行。
-        --pm を付けるとエラーの行で止まる（事後デバッグ）。--nobp は赤丸を無視する"""
-        pm, nobp, rest = split_flags(line)
-        path = rest.strip('"').strip("'")
-        if not path:
-            print("usage: %ipydesk [--pm] [--nobp] script.py")
+        """%ipydesk [--pm] [--nobp] script.py [-- args...] — 赤丸で停止しつつ、現在の名前空間でスクリプトを実行。
+        --pm を付けるとエラーの行で止まる（事後デバッグ）。--nobp は赤丸を無視する。
+        -- の後ろは sys.argv[1:] としてスクリプトに渡す"""
+        parsed = _parse_target(line)
+        if parsed is None:
             return
-        run_script(Path(path), self.shell.user_ns, post_mortem=pm, use_breakpoints=not nobp)
+        pm, nobp, before, argv = parsed
+        path = before.strip('"').strip("'")
+        if not path:
+            print("usage: %ipydesk [--pm] [--nobp] script.py [-- args...]")
+            return
+        run_script(
+            Path(path), self.shell.user_ns,
+            post_mortem=pm, use_breakpoints=not nobp, argv=argv,
+        )
 
+    @no_var_expand
     @line_magic
     def ipydesk_cell(self, line: str):
-        """%ipydesk_cell [--pm] script.py START END — その行範囲だけを現在の名前空間で実行"""
-        pm, nobp, rest = split_flags(line)
+        """%ipydesk_cell [--pm] [--nobp] script.py START END [-- args...] — その行範囲だけを現在の名前空間で実行"""
+        parsed = _parse_target(line)
+        if parsed is None:
+            return
+        pm, nobp, before, argv = parsed
         try:
-            head, start, end = rest.rsplit(None, 2)
+            head, start, end = before.rsplit(None, 2)
             span = (int(start), int(end))
         except ValueError:
-            print("usage: %ipydesk_cell [--pm] script.py START END")
+            print("usage: %ipydesk_cell [--pm] [--nobp] script.py START END [-- args...]")
             return
         path = head.strip().strip('"').strip("'")
         run_cell(
             Path(path), span[0], span[1], self.shell.user_ns,
-            post_mortem=pm, use_breakpoints=not nobp,
+            post_mortem=pm, use_breakpoints=not nobp, argv=argv,
         )
 
     @line_magic

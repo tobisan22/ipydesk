@@ -146,16 +146,16 @@ def test_run_script_still_runs_the_whole_file(sample):
 
 
 def test_parse_args_reads_cell_range():
-    script, cell = parse_args(["/work/a.py", "--cell", "3", "9"])
+    script, cell, args = parse_args(["/work/a.py", "--cell", "3", "9"])
     assert cell == (3, 9)
     assert script is not None and script.name == "a.py"
 
 
 def test_parse_args_without_cell():
-    script, cell = parse_args(["/work/a.py"])
-    assert cell is None and script is not None
+    script, cell, args = parse_args(["/work/a.py"])
+    assert cell is None and script is not None and args == ""
 
-    assert parse_args([]) == (None, None)
+    assert parse_args([]) == (None, None, "")
 
 
 def test_startup_runs_the_cell_when_given_one():

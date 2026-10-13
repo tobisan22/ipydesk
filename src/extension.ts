@@ -132,6 +132,7 @@ function setClipboardImage(pngPath: string): Promise<void> {
 // ないので、拡張の workspaceState に持ち、py_breakpoints.json に "active" として書く。
 // 個々の赤丸の enabled は変更しない
 const BP_ACTIVE_KEY = "ipydesk.breakpointsActive";
+const SCRIPT_ARGS_KEY = "ipydesk.scriptArgs";   // { 正規化したファイルパス: 引数の生の文字列 }
 let bpActive = true;
 
 /** 有効な .py の赤丸（個別に無効なものは除く） */
@@ -216,7 +217,7 @@ export function activate(context: vscode.ExtensionContext) {
     ws: WsData | null;                             // 最後に受け取った変数一覧
     error?: ErrInfo;                               // 直前の実行のエラー（次の実行で消える）
     trace?: BpLoc[];                               // 赤丸のトレースで実行中なら、その赤丸（ステータスバーの ⚠）
-    lastRun?: { script: string; cell?: { start: number; end: number } };   // 直前に送った実行
+    lastRun?: { script: string; cell?: { start: number; end: number }; args: string };   // 直前に送った実行（引数は実行した時点のもの）
     traceNotified?: number;                        // 低速実行の通知を出した trace_done.id
     lastUsed: number;
   }
@@ -308,7 +309,10 @@ export function activate(context: vscode.ExtensionContext) {
   // 赤丸の状態: ● BP n（有効な赤丸がある）/ ⚠ BP トレース中（実行中で遅い）/ ○ BP 無効
   const bpStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
   bpStatus.command = "ipydesk.showBreakpoints";
-  context.subscriptions.push(status, errStatus, bpStatus);
+  // スクリプト引数: アクティブな Python ファイルに設定されている引数（クリックで変更）
+  const argsStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+  argsStatus.command = "ipydesk.setArgs";
+  context.subscriptions.push(status, errStatus, bpStatus, argsStatus);
   bpActive = context.workspaceState.get<boolean>(BP_ACTIVE_KEY, true);
 
   const updateBpStatus = () => {
@@ -864,6 +868,64 @@ export function activate(context: vscode.ExtensionContext) {
     refresh();
   };
 
+  // ---- スクリプト引数（sys.argv） ----
+  // 実行する行（%ipydesk "…" -- 引数）にそのまま書く。生の文字列のまま持ち、
+  // 分割は Python 側（core.split_args）だけが行う。
+  const argsKey = (file: string) => {
+    const f = path.resolve(file);
+    return process.platform === "win32" ? f.toLowerCase() : f;
+  };
+  const getArgs = (file: string): string => {
+    const all = context.workspaceState.get<Record<string, string>>(SCRIPT_ARGS_KEY, {});
+    return (all[argsKey(file)] ?? "").replace(/[\r\n]+/g, " ").trim();
+  };
+  const updateArgsStatus = () => {
+    const ed = vscode.window.activeTextEditor;
+    if (!ed || ed.document.languageId !== "python") { argsStatus.hide(); return; }
+    const a = getArgs(ed.document.uri.fsPath);
+    if (a) {
+      argsStatus.text = `$(symbol-parameter) ${a.length > 30 ? a.slice(0, 30) + "…" : a}`;
+      argsStatus.tooltip = `引数: ${a}\nクリックで変更`;
+    } else {
+      argsStatus.text = "$(symbol-parameter)";
+      argsStatus.tooltip = "引数なし — クリックで設定";
+    }
+    argsStatus.show();
+  };
+  const setArgs = async (file: string, raw: string) => {
+    const all = { ...context.workspaceState.get<Record<string, string>>(SCRIPT_ARGS_KEY, {}) };
+    const v = raw.replace(/[\r\n]+/g, " ").trim();
+    if (v) { all[argsKey(file)] = v; } else { delete all[argsKey(file)]; }
+    await context.workspaceState.update(SCRIPT_ARGS_KEY, all);
+    updateArgsStatus();
+  };
+  /** 入力欄用の簡易チェック。問題があればメッセージ（正式な分割は Python 側） */
+  const validateArgs = (raw: string): string | undefined => {
+    let q = "";
+    for (const ch of raw) {
+      if (q) { if (ch === q) { q = ""; } } else if (ch === '"' || ch === "'") { q = ch; }
+    }
+    if (q) { return "引用符が閉じていません"; }
+    if (raw.trimEnd().endsWith("?")) {
+      return '末尾の ? は IPython のヘルプになります。"…?" と囲んでください';
+    }
+    return undefined;
+  };
+  /** 入力欄を出して保存する。Esc なら false */
+  const askArgs = async (file: string): Promise<boolean> => {
+    const v = await vscode.window.showInputBox({
+      title: `IPyDesk: 引数（${path.basename(file)}）`,
+      value: getArgs(file),
+      placeHolder: '例: --n 10 --in "C:\\data\\a b.csv"',
+      prompt: '空にすると引数なし。"…" / \'…\' で空白を含む値をまとめる。\\ はそのまま',
+      validateInput: validateArgs,
+    });
+    if (v === undefined) { return false; }
+    await setArgs(file, v);
+    return true;
+  };
+  updateArgsStatus();
+
   // cell を渡すと、起動直後にスクリプト全体ではなくその行範囲だけを実行する。
   // id を渡すとその番号で作る（再起動で同じ番号・同じターミナル名を引き継ぐ）
   // 起動は同時に 1 つまで。probe に 1〜2 秒かかるので、その間の F5 連打で
@@ -871,14 +933,14 @@ export function activate(context: vscode.ExtensionContext) {
   let starting = false;
   const startSession = async (
     scriptPath?: string, cell?: { start: number; end: number }, id?: number, pm = false,
-    noBp = false) => {
+    noBp = false, scriptArgs = "") => {
     if (starting) {
       vscode.window.setStatusBarMessage("IPyDesk: セッションを起動中です", 3000);
       return;
     }
     starting = true;
     try {
-      await launchSession(scriptPath, cell, id, pm, noBp);
+      await launchSession(scriptPath, cell, id, pm, noBp, scriptArgs);
     } finally {
       starting = false;
     }
@@ -886,7 +948,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const launchSession = async (
     scriptPath?: string, cell?: { start: number; end: number }, id?: number, pm = false,
-    noBp = false) => {
+    noBp = false, scriptArgs = "") => {
     // ほかのセッションが動いていればそのログは残す
     const lp = extLogPath();
     if (lp && sessions.size === 0) { try { fs.writeFileSync(lp, ""); } catch { /* ignore */ } }
@@ -968,12 +1030,15 @@ export function activate(context: vscode.ExtensionContext) {
     // 同じ shellPath / shellArgs でターミナルを復元し、前回のスクリプトが勝手に走る。
     const name = sid === 1 ? "IPyDesk" : `IPyDesk ${sid}`;
     const terminal = vscode.window.createTerminal({
-      name, shellPath: probe.exe, shellArgs: args, env, isTransient: true,
+      // 引数は、シェルを挟まない起動ではコマンドラインの組み直しで壊れうるので、環境変数で生のまま渡す
+      name, shellPath: probe.exe, shellArgs: args,
+      env: scriptPath && scriptArgs ? { ...env, IPYDESK_ARGS: scriptArgs } : env,
+      isTransient: true,
     });
     const s: Session = {
       id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), closedIds: new Set(), ws: null,
       lastUsed: Date.now(),
-      lastRun: scriptPath ? { script: scriptPath, cell } : undefined,
+      lastRun: scriptPath ? { script: scriptPath, cell, args: scriptArgs } : undefined,
     };
     sessions.set(sid, s);
     activeId = sid;
@@ -999,7 +1064,9 @@ export function activate(context: vscode.ExtensionContext) {
    */
   const dispatch = async (
     scriptPath: string, cell?: { start: number; end: number }, forceNew = false, pm = false,
-    noBp = false) => {
+    noBp = false, argsOverride?: string) => {
+    // 遅い実行の再実行は、そのときの引数で行う（あとで引数を変えていても再現できる）
+    const args = argsOverride ?? getArgs(scriptPath);
     const a = active();
     const target = forceNew ? undefined : pickSession();
     if (!forceNew && a && target !== a && isAlive(a)) {
@@ -1008,18 +1075,19 @@ export function activate(context: vscode.ExtensionContext) {
         + ` ${target?.name ?? "新しいセッション"} で実行します`, 4000);
     }
     if (!target) {
-      await startSession(scriptPath, cell, undefined, pm, noBp);
+      await startSession(scriptPath, cell, undefined, pm, noBp, args);
       return;
     }
     setActive(target);
     target.error = undefined;   // 実行を始めた時点で前のエラーには入れなくなる
-    target.lastRun = { script: scriptPath, cell };
+    target.lastRun = { script: scriptPath, cell, args };
     updateStatus();
     target.terminal.show(true);
     const opt = (pm ? "--pm " : "") + (noBp ? "--nobp " : "");
+    const tail = args ? ` -- ${args}` : "";
     target.terminal.sendText(cell
-      ? `%ipydesk_cell ${opt}"${scriptPath}" ${cell.start} ${cell.end}`
-      : `%ipydesk ${opt}"${scriptPath}"`);
+      ? `%ipydesk_cell ${opt}"${scriptPath}" ${cell.start} ${cell.end}${tail}`
+      : `%ipydesk ${opt}"${scriptPath}"${tail}`);
   };
 
   // ---- 赤丸 ----
@@ -1248,9 +1316,9 @@ export function activate(context: vscode.ExtensionContext) {
       REPLAY, DISABLE, NEWSESS);
     const run = s.lastRun;
     if (pick === REPLAY && run) {
-      await dispatch(run.script, run.cell, false, false, true);
+      await dispatch(run.script, run.cell, false, false, true, run.args);
     } else if (pick === NEWSESS && run) {
-      await dispatch(run.script, run.cell, true);
+      await dispatch(run.script, run.cell, true, false, false, run.args);
     } else if (pick === DISABLE) {
       let targets = done.bps;
       if (targets.length > 1) {
@@ -1266,6 +1334,23 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("ipydesk.run", runFile(false)),
     vscode.commands.registerCommand("ipydesk.runInNewSession", runFile(true)),
+    vscode.commands.registerCommand("ipydesk.runWithArgs", async () => {
+      const doc = vscode.window.activeTextEditor?.document;
+      if (!doc || doc.languageId !== "python") {
+        vscode.window.showWarningMessage("IPyDesk: Python ファイルを開いてください");
+        return;
+      }
+      if (await askArgs(doc.uri.fsPath)) { await runFile(false)(); }
+    }),
+    vscode.commands.registerCommand("ipydesk.setArgs", async () => {
+      const doc = vscode.window.activeTextEditor?.document;
+      if (!doc || doc.languageId !== "python") {
+        vscode.window.showWarningMessage("IPyDesk: Python ファイルを開いてください");
+        return;
+      }
+      await askArgs(doc.uri.fsPath);
+    }),
+    vscode.window.onDidChangeActiveTextEditor(updateArgsStatus),
     vscode.commands.registerCommand("ipydesk.runStopOnError", runFile(false, true)),
     vscode.commands.registerCommand("ipydesk.runWithoutBreakpoints", runFile(false, false, true)),
     vscode.commands.registerCommand("ipydesk.toggleAllBreakpoints", () => setBpActive(!bpActive)),
