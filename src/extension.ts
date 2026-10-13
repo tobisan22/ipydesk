@@ -1066,7 +1066,8 @@ export function activate(context: vscode.ExtensionContext) {
     scriptPath: string, cell?: { start: number; end: number }, forceNew = false, pm = false,
     noBp = false, argsOverride?: string) => {
     // 遅い実行の再実行は、そのときの引数で行う（あとで引数を変えていても再現できる）
-    const args = argsOverride ?? getArgs(scriptPath);
+    // 引数はファイル全体の実行（F5 系）だけに渡す。セル・選択範囲・現在行の実行には渡さない
+    const args = cell ? "" : (argsOverride ?? getArgs(scriptPath));
     const a = active();
     const target = forceNew ? undefined : pickSession();
     if (!forceNew && a && target !== a && isAlive(a)) {
