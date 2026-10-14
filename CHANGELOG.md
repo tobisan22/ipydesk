@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-14
+
+### Added
+
+- 引数の履歴（スクリプトごとに最大 10 件）。ステータスバーから切り替えられます。`.vscode/ipydesk_args.json` に保存し、手で編集・共有できます。
+
+### Changed
+
+- 0.1.2 で設定した引数は `ipydesk_args.json` に自動で移します。
+
 ## [0.1.2] - 2026-10-13
 
 ### Added

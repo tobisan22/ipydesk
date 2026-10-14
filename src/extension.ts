@@ -28,6 +28,7 @@
  */
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as ArgList from "./argList";
 import * as os from "os";
 import * as path from "path";
 import * as http from "http";
@@ -132,7 +133,11 @@ function setClipboardImage(pngPath: string): Promise<void> {
 // ないので、拡張の workspaceState に持ち、py_breakpoints.json に "active" として書く。
 // 個々の赤丸の enabled は変更しない
 const BP_ACTIVE_KEY = "ipydesk.breakpointsActive";
-const SCRIPT_ARGS_KEY = "ipydesk.scriptArgs";   // { 正規化したファイルパス: 引数の生の文字列 }
+// 0.1.2 の引数（{ 正規化したファイルパス: 引数の生の文字列 }）。移行にだけ使う
+const SCRIPT_ARGS_KEY = "ipydesk.scriptArgs";
+// 選択中の引数（{ 小文字化したスクリプトのキー: 引数の文字列 }）。個人の状態なので Git に乗らない
+const SELECTED_ARGS_KEY = "ipydesk.selectedArgs";
+const ARGS_FILE = "ipydesk_args.json";
 let bpActive = true;
 
 /** 有効な .py の赤丸（個別に無効なものは除く） */
@@ -871,33 +876,162 @@ export function activate(context: vscode.ExtensionContext) {
   // ---- スクリプト引数（sys.argv） ----
   // 実行する行（%ipydesk "…" -- 引数）にそのまま書く。生の文字列のまま持ち、
   // 分割は Python 側（core.split_args）だけが行う。
-  const argsKey = (file: string) => {
-    const f = path.resolve(file);
-    return process.platform === "win32" ? f.toLowerCase() : f;
+  // 一覧は .vscode/ipydesk_args.json（手で直せる・共有できる）、選択中は workspaceState（個人）
+  const argsFilePath = () => {
+    const d = vscodeDir();
+    return d ? path.join(d, ARGS_FILE) : undefined;
   };
+  let argData: ArgList.ArgFile = { version: 1, scripts: {} };
+  let argBroken = false;
+  let argBrokenWarned = false;
+  let lastWritten: string | undefined;
+
+  const argKeyOf = (file: string) => ArgList.keyFor(path.resolve(file), workspaceRoot());
+  const cleanArgs = (raw: string) => raw.replace(/[\r\n]+/g, " ").trim();
+  const selectedMap = () =>
+    context.workspaceState.get<Record<string, string>>(SELECTED_ARGS_KEY, {});
+  const selectedOf = (file: string): string =>
+    cleanArgs(selectedMap()[ArgList.norm(argKeyOf(file))] ?? "");
+  /** 選択中の引数。一覧に無ければ ""（workspaceState の値は残す） */
   const getArgs = (file: string): string => {
-    const all = context.workspaceState.get<Record<string, string>>(SCRIPT_ARGS_KEY, {});
-    return (all[argsKey(file)] ?? "").replace(/[\r\n]+/g, " ").trim();
+    const sel = selectedOf(file);
+    return sel && ArgList.list(argData, argKeyOf(file)).includes(sel) ? sel : "";
   };
+  const selectArgs = async (file: string, args: string) => {
+    const all = { ...selectedMap() };
+    const k = ArgList.norm(argKeyOf(file));
+    if (args) { all[k] = args; } else { delete all[k]; }
+    await context.workspaceState.update(SELECTED_ARGS_KEY, all);
+    updateArgsStatus();
+  };
+
+  const writeArgsFile = (p: string, data: ArgList.ArgFile) => {
+    const text = ArgList.serialize(data);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p + ".tmp", text, "utf8");
+    fs.renameSync(p + ".tmp", p);      // 書きかけを読ませない
+    lastWritten = text;                // 監視で自分の書き込みを読み直さない
+  };
+
+  const openArgsFile = async (file?: string) => {
+    const p = argsFilePath();
+    if (!p) {
+      vscode.window.showWarningMessage("IPyDesk: フォルダを開くと引数を保存できます");
+      return;
+    }
+    if (!fs.existsSync(p)) { writeArgsFile(p, { version: 1, scripts: {} }); }
+    const doc = await vscode.workspace.openTextDocument(p);
+    const ed = await vscode.window.showTextDocument(doc);
+    if (!file) { return; }
+    const fileKey = ArgList.lookup(argData, argKeyOf(file));
+    if (fileKey === undefined) { return; }
+    const idx = doc.getText().indexOf(JSON.stringify(fileKey) + ":");
+    if (idx >= 0) {
+      const pos = doc.positionAt(idx);
+      ed.selection = new vscode.Selection(pos, pos);
+      ed.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    }
+  };
+
+  /** ファイルを読み直す。壊れていれば直前の内容で動き続ける（警告は 1 回だけ） */
+  const loadArgs = () => {
+    const p = argsFilePath();
+    if (!p) { return; }
+    let text: string;
+    try {
+      text = fs.readFileSync(p, "utf8");
+    } catch {
+      argData = { version: 1, scripts: {} };   // 無い（消えた）ときは空とみなす
+      argBroken = false;
+      argBrokenWarned = false;
+      return;
+    }
+    if (text === lastWritten) { return; }
+    const r = ArgList.parse(text);
+    if (r.ok) {
+      argData = r.data;
+      argBroken = false;
+      argBrokenWarned = false;
+    } else {
+      argBroken = true;
+      if (!argBrokenWarned) {
+        argBrokenWarned = true;
+        void vscode.window.showWarningMessage(
+          `IPyDesk: ${ARGS_FILE} を読めません（${r.error}）。直すまで直前の内容で動きます`, "開く")
+          .then(c => { if (c === "開く") { void openArgsFile(); } });
+      }
+    }
+  };
+
+  /** 一覧を変える操作（書き込むのはここだけ）。成功したら true */
+  const mutateList = (file: string, fn: (l: string[]) => string[]): boolean => {
+    const p = argsFilePath();
+    if (!p) {
+      vscode.window.showWarningMessage("IPyDesk: フォルダを開くと引数を保存できます");
+      return false;
+    }
+    loadArgs();
+    if (argBroken) {
+      vscode.window.showWarningMessage(`IPyDesk: ${ARGS_FILE} を直してから変更してください`);
+      return false;
+    }
+    const key = ArgList.lookup(argData, argKeyOf(file)) ?? argKeyOf(file);   // 既存の表記を保つ
+    const before = ArgList.list(argData, key);
+    const after = fn(before);
+    if (after.length === before.length && after.every((x, i) => x === before[i])) { return true; }
+    const data: ArgList.ArgFile = { version: 1, scripts: { ...argData.scripts, [key]: after } };
+    writeArgsFile(p, data);
+    argData = data;
+    return true;
+  };
+
+  /** 0.1.2 の workspaceState（ファイルごと 1 つ）を一覧へ移す。起動時に 1 回 */
+  const migrateOldArgs = async () => {
+    const old = context.workspaceState.get<Record<string, string>>(SCRIPT_ARGS_KEY);
+    if (!old) { return; }
+    if (Object.keys(old).length === 0) {
+      await context.workspaceState.update(SCRIPT_ARGS_KEY, undefined);
+      return;
+    }
+    if (argBroken || !argsFilePath()) { return; }   // 後回し（古いキーは消さない）
+    const sel = { ...selectedMap() };
+    for (const [oldPath, raw] of Object.entries(old)) {
+      const v = cleanArgs(raw ?? "");
+      if (!v) { continue; }
+      if (!mutateList(oldPath, l => ArgList.add(l, v).list)) { return; }
+      sel[ArgList.norm(argKeyOf(oldPath))] = v;
+    }
+    await context.workspaceState.update(SELECTED_ARGS_KEY, sel);
+    await context.workspaceState.update(SCRIPT_ARGS_KEY, undefined);
+  };
+
   const updateArgsStatus = () => {
     const ed = vscode.window.activeTextEditor;
     if (!ed || ed.document.languageId !== "python") { argsStatus.hide(); return; }
-    const a = getArgs(ed.document.uri.fsPath);
-    if (a) {
-      argsStatus.text = `$(symbol-parameter) ${a.length > 30 ? a.slice(0, 30) + "…" : a}`;
-      argsStatus.tooltip = `引数: ${a}\nクリックで変更`;
-    } else {
-      argsStatus.text = "$(symbol-parameter)";
+    const file = ed.document.uri.fsPath;
+    argsStatus.text = "$(symbol-parameter)";
+    if (!vscodeDir()) {
+      argsStatus.tooltip = "フォルダを開くと引数を保存できます";
+      argsStatus.show();
+      return;
+    }
+    const l = ArgList.list(argData, argKeyOf(file));
+    const a = getArgs(file);
+    if (l.length === 0) {
       argsStatus.tooltip = "引数なし — クリックで設定";
+    } else {
+      argsStatus.text = a
+        ? `$(symbol-parameter) ${a.length > 30 ? a.slice(0, 30) + "…" : a}`
+        : "$(symbol-parameter) なし";
+      const md = new vscode.MarkdownString();
+      l.forEach((x, i) => {
+        if (i > 0) { md.appendMarkdown("\n\n"); }
+        md.appendText(`${x === a ? "✓ " : "\u2003 "}${x}`);
+      });
+      md.appendMarkdown("\n\n---\n\nクリックで切り替え");
+      argsStatus.tooltip = md;
     }
     argsStatus.show();
-  };
-  const setArgs = async (file: string, raw: string) => {
-    const all = { ...context.workspaceState.get<Record<string, string>>(SCRIPT_ARGS_KEY, {}) };
-    const v = raw.replace(/[\r\n]+/g, " ").trim();
-    if (v) { all[argsKey(file)] = v; } else { delete all[argsKey(file)]; }
-    await context.workspaceState.update(SCRIPT_ARGS_KEY, all);
-    updateArgsStatus();
   };
   /** 入力欄用の簡易チェック。問題があればメッセージ（正式な分割は Python 側） */
   const validateArgs = (raw: string): string | undefined => {
@@ -911,20 +1045,131 @@ export function activate(context: vscode.ExtensionContext) {
     }
     return undefined;
   };
-  /** 入力欄を出して保存する。Esc なら false */
-  const askArgs = async (file: string): Promise<boolean> => {
-    const v = await vscode.window.showInputBox({
-      title: `IPyDesk: 引数（${path.basename(file)}）`,
-      value: getArgs(file),
-      placeHolder: '例: --n 10 --in "C:\\data\\a b.csv"',
-      prompt: '空にすると引数なし。"…" / \'…\' で空白を含む値をまとめる。\\ はそのまま',
-      validateInput: validateArgs,
+
+  type ArgItem = vscode.QuickPickItem & { args?: string; act?: "add" | "none" | "error" };
+  /** 引数の一覧を出して選ばせる。実行してよい（選ばれた）なら true。Esc は false */
+  const pickArgs = (file: string, mode: "set" | "run"): Promise<boolean> => {
+    if (!vscodeDir()) {
+      vscode.window.showWarningMessage("IPyDesk: フォルダを開くと引数を保存できます");
+      return Promise.resolve(false);
+    }
+    loadArgs();
+    const base = path.basename(file);
+    const title = mode === "run"
+      ? `IPyDesk: 引数を選んで実行（${base}）` : `IPyDesk: 引数（${base}）`;
+    const itemButtons: vscode.QuickInputButton[] = [
+      { iconPath: new vscode.ThemeIcon("edit"), tooltip: "編集" },
+      { iconPath: new vscode.ThemeIcon("trash"), tooltip: "削除" },
+    ];
+    return new Promise<boolean>(resolve => {
+      const qp = vscode.window.createQuickPick<ArgItem>();
+      qp.title = title;
+      qp.placeholder = '絞り込み、または新しい引数を入力（例: --n 10 --in "C:\\data\\a b.csv"）';
+      qp.matchOnDescription = false;
+      qp.buttons = [{ iconPath: new vscode.ThemeIcon("json"), tooltip: `${ARGS_FILE} を開く` }];
+      let finished = false;
+      let editing = false;
+      const finish = (v: boolean) => {
+        if (finished) { return; }
+        finished = true;
+        qp.dispose();
+        resolve(v);
+      };
+      const render = (initial = false) => {
+        const l = ArgList.list(argData, argKeyOf(file));
+        const cur = getArgs(file);
+        const typed = cleanArgs(qp.value);
+        const items: ArgItem[] = [];
+        if (typed && !l.includes(typed)) {
+          const err = validateArgs(typed);
+          items.push(err
+            ? { label: `$(error) ${err}`, act: "error", alwaysShow: true }
+            : { label: `$(add) 「${typed}」を追加`, act: "add", alwaysShow: true });
+        }
+        const argItems: ArgItem[] = l.map(a => ({
+          label: `${a === cur ? "$(check)" : "\u2003\u2002"} ${a}`,
+          args: a,
+          buttons: itemButtons,
+        }));
+        items.push(...argItems);
+        items.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
+        items.push({ label: "(引数なし)", act: "none", alwaysShow: true });
+        qp.items = items;
+        if (initial) {
+          const hit = argItems.find(x => x.args === cur);
+          if (hit) { qp.activeItems = [hit]; }
+        }
+      };
+      render(true);
+      qp.onDidChangeValue(() => render());
+      qp.onDidAccept(async () => {
+        const it = qp.selectedItems[0] ?? qp.activeItems[0];
+        if (!it || it.act === "error") { return; }
+        if (it.act === "add") {
+          const v = cleanArgs(qp.value);
+          const sel = getArgs(file);
+          if (!mutateList(file, l => ArgList.add(l, v, sel).list)) { return; }
+          await selectArgs(file, v);
+          finish(true);
+        } else if (it.act === "none") {
+          await selectArgs(file, "");
+          finish(true);
+        } else if (it.args !== undefined) {
+          await selectArgs(file, it.args);
+          finish(true);
+        }
+      });
+      qp.onDidTriggerButton(() => {
+        finish(false);
+        void openArgsFile(file);
+      });
+      qp.onDidTriggerItemButton(async e => {
+        const old = e.item.args;
+        if (old === undefined) { return; }
+        if (e.button.tooltip === "削除") {
+          const wasSel = getArgs(file) === old;
+          if (mutateList(file, l => ArgList.remove(l, old)) && wasSel) { await selectArgs(file, ""); }
+          updateArgsStatus();
+          render();
+          return;
+        }
+        editing = true;
+        qp.hide();
+        const v = await vscode.window.showInputBox({
+          title: `IPyDesk: 引数を編集（${base}）`,
+          value: old,
+          validateInput: validateArgs,
+        });
+        editing = false;
+        const next = v === undefined ? "" : cleanArgs(v);
+        if (next && next !== old) {
+          const wasSel = getArgs(file) === old;
+          if (mutateList(file, l => ArgList.edit(l, old, next)) && wasSel) {
+            await selectArgs(file, next);
+          }
+          updateArgsStatus();
+        }
+        render();
+        qp.show();
+      });
+      qp.onDidHide(() => { if (!editing) { finish(false); } });
+      qp.show();
     });
-    if (v === undefined) { return false; }
-    await setArgs(file, v);
-    return true;
   };
-  updateArgsStatus();
+
+  // 起動時に読み、手での編集・Git の pull を監視する
+  loadArgs();
+  void migrateOldArgs().then(updateArgsStatus);
+  const argRoot = vscode.workspace.workspaceFolders?.[0];
+  if (argRoot) {
+    const argWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(argRoot, `.vscode/${ARGS_FILE}`));
+    const reload = () => { loadArgs(); updateArgsStatus(); };
+    argWatcher.onDidChange(reload);
+    argWatcher.onDidCreate(reload);
+    argWatcher.onDidDelete(reload);
+    context.subscriptions.push(argWatcher);
+  }
 
   // cell を渡すと、起動直後にスクリプト全体ではなくその行範囲だけを実行する。
   // id を渡すとその番号で作る（再起動で同じ番号・同じターミナル名を引き継ぐ）
@@ -1341,7 +1586,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showWarningMessage("IPyDesk: Python ファイルを開いてください");
         return;
       }
-      if (await askArgs(doc.uri.fsPath)) { await runFile(false)(); }
+      if (await pickArgs(doc.uri.fsPath, "run")) { await runFile(false)(); }
     }),
     vscode.commands.registerCommand("ipydesk.setArgs", async () => {
       const doc = vscode.window.activeTextEditor?.document;
@@ -1349,7 +1594,11 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showWarningMessage("IPyDesk: Python ファイルを開いてください");
         return;
       }
-      await askArgs(doc.uri.fsPath);
+      await pickArgs(doc.uri.fsPath, "set");
+    }),
+    vscode.commands.registerCommand("ipydesk.openArgsFile", () => {
+      const doc = vscode.window.activeTextEditor?.document;
+      return openArgsFile(doc && doc.languageId === "python" ? doc.uri.fsPath : undefined);
     }),
     vscode.window.onDidChangeActiveTextEditor(updateArgsStatus),
     vscode.commands.registerCommand("ipydesk.runStopOnError", runFile(false, true)),
