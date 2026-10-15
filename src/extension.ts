@@ -140,11 +140,19 @@ const SELECTED_ARGS_KEY = "ipydesk.selectedArgs";
 const ARGS_FILE = "ipydesk_args.json";
 let bpActive = true;
 
-/** 有効な .py の赤丸（個別に無効なものは除く） */
-function enabledBreakpoints(): vscode.SourceBreakpoint[] {
+/** 実在する .py ファイルの赤丸。
+ *  VS Code は、ファイル監視が削除を通知したときにしか赤丸を消さない。VS Code を閉じている間に
+ *  消した・名前を変えたファイルや、ワークスペース外のファイルの赤丸は一覧に残り続けるので、
+ *  JSON への書き出し・件数・一覧の対象から外す（VS Code 側の赤丸そのものは消さない） */
+function pyBreakpoints(): vscode.SourceBreakpoint[] {
   return vscode.debug.breakpoints
     .filter((b): b is vscode.SourceBreakpoint => b instanceof vscode.SourceBreakpoint)
-    .filter(b => b.enabled && b.location.uri.fsPath.endsWith(".py"));
+    .filter(b => b.location.uri.fsPath.endsWith(".py") && fs.existsSync(b.location.uri.fsPath));
+}
+
+/** 有効な .py の赤丸（個別に無効なもの・存在しないファイルのものは除く） */
+function enabledBreakpoints(): vscode.SourceBreakpoint[] {
+  return pyBreakpoints().filter(b => b.enabled);
 }
 
 /** 赤丸の方式。inject: 赤丸の行に止まる呼び出しを埋め込む（速い）/ trace: 従来のトレース */
@@ -156,9 +164,7 @@ function breakpointMode(): "inject" | "trace" {
 function dumpBreakpoints() {
   const dir = vscodeDir();
   if (!dir) { return; }
-  const bps = vscode.debug.breakpoints
-    .filter((b): b is vscode.SourceBreakpoint => b instanceof vscode.SourceBreakpoint)
-    .filter(b => b.location.uri.fsPath.endsWith(".py"))
+  const bps = pyBreakpoints()
     .map(b => ({
       file: b.location.uri.fsPath,
       line: b.location.range.start.line + 1,   // 0-based → 1-based
@@ -1348,7 +1354,14 @@ export function activate(context: vscode.ExtensionContext) {
         dumpBreakpoints();
         updateBpStatus();
       }
-    }));
+    }),
+    // VS Code の中で消した・名前を変えた・作り直したファイルの赤丸を、JSON と件数に反映する
+    // （赤丸が変わらない場合は onDidChangeBreakpoints が来ないため）
+    ...[vscode.workspace.onDidDeleteFiles, vscode.workspace.onDidRenameFiles,
+      vscode.workspace.onDidCreateFiles].map(ev => ev(() => {
+      dumpBreakpoints();
+      updateBpStatus();
+    })));
 
   // ---- セル / 選択範囲の実行 ----
   const pythonEditor = (): vscode.TextEditor | undefined => {

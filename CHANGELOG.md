@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-15
+
+### Fixed
+
+- 削除・名前変更したファイルの赤丸が `.vscode/py_breakpoints.json` に残る問題を直しました。VS Code を閉じている間に消したファイルや、ワークスペース外のファイルの赤丸は VS Code の一覧に残ることがあり、ステータスバーの件数（`● BP n`）や赤丸の一覧にも出ていました。存在しないファイルの赤丸は、書き出し・件数・一覧の対象から外します（VS Code のブレークポイント一覧からは消しません）。
+
 ## [0.1.3] - 2026-10-14
 
 ### Added
