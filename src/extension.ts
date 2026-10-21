@@ -765,6 +765,7 @@ export function activate(context: vscode.ExtensionContext) {
   //  PYTHONPATH : 同梱した ipydesk を pip install 無しで import できるようにする
   //  IPYDESK_SESSION_DIR : このセッションの通知ファイルの置き場所（セッションごとに別）
   //  IPYDESK_FIG_HISTORY : Figure タブに残す履歴の枚数（ipydesk.figureHistory）
+  //  IPYDESK_MAX_OUTPUT  : コンソールの表示（Out[n]・停止中の式の表示）の上限文字数（ipydesk.maxOutputChars）
   //  FOR_DISABLE_CONSOLE_CTRL_HANDLER : Intel Fortran ランタイム（conda の MKL 版
   //               numpy / scipy が読み込む libifcoremd.dll）が独自の Ctrl+C ハンドラを
   //               入れないようにする。入ると Ctrl+C で "forrtl: error (200)" を出して
@@ -774,6 +775,7 @@ export function activate(context: vscode.ExtensionContext) {
       FOR_DISABLE_CONSOLE_CTRL_HANDLER: "1",
       IPYDESK_PORT: String(config().get<number>("webaggPort", 8988) + id - 1),
       IPYDESK_FIG_HISTORY: String(Math.max(0, Math.floor(config().get<number>("figureHistory", 20)))),
+      IPYDESK_MAX_OUTPUT: String(Math.max(0, Math.floor(config().get<number>("maxOutputChars", 200000)))),
       ...(dir ? { IPYDESK_SESSION_DIR: dir } : {}),
       IPYDESK_MPL: {
         tab: "webagg",

@@ -20,12 +20,13 @@ from __future__ import annotations
 import json
 import numbers
 import os
-import reprlib
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+from . import workspace
 
 REQ_PREFIX = "py_varreq_"  # 拡張 → Python : 問い合わせ
 RES_PREFIX = "py_varres_"  # Python → 拡張 : 答え
@@ -36,7 +37,9 @@ MAX_COPY_CELLS = 200_000  # コピー（TSV）で返すセル数の上限
 MAX_TEXT = 80  # セル 1 つの表示文字数の上限
 POLL_SEC = 0.05
 
-_repr = reprlib.Repr()
+STALE_SEC = 60  # 拡張がタイムアウトで諦めた答え（拾われない py_varres_*）を消すまでの秒数
+
+_repr = workspace.SafeRepr()
 _repr.maxstring = MAX_TEXT
 _repr.maxother = MAX_TEXT
 _repr.maxlist = _repr.maxtuple = 4
@@ -299,8 +302,28 @@ def resolve(expr: str, shell=None) -> tuple[Any, str]:
     return eval(expr, g, loc if loc is not None else g), scope
 
 
+BUSY_MESSAGE = "実行中のため表示できません（止まるか、実行が終わると表示します）"
+
+
 def handle(req: dict, shell=None) -> dict:
-    """1 件の問い合わせに答える。失敗は error に入れて返す"""
+    """1 件の問い合わせに答える。失敗は error に入れて返す。
+
+    値を読むのは、セッションがプロンプト待ち・ブレークポイントで停止中のときだけ。
+    スクリプトの実行中に別スレッドから DataFrame などを読むと、書き換えの途中の
+    中身を読む（例外・壊れた値）うえ、停止フレームの変数を実行再開と同時に読む
+    競合も起きる。core.ns_lock で、メインスレッドが再開する前に読み終えるようにする。
+    """
+    from . import core
+
+    rid = req.get("id")
+    with core.ns_lock:
+        if not core.ns_ready:
+            return {"id": rid, "ok": False, "error": BUSY_MESSAGE, "transient": True}
+        with workspace.display_limits():
+            return _handle(req, shell)
+
+
+def _handle(req: dict, shell=None) -> dict:
     rid = req.get("id")
     try:
         v, scope = resolve(str(req.get("expr", "")), shell)
@@ -330,23 +353,39 @@ def serve_once(folder: Path, shell=None) -> int:
     """届いている問い合わせをすべて処理する。処理した件数を返す"""
     n = 0
     try:
-        entries = [e for e in os.scandir(folder)
-                   if e.name.startswith(REQ_PREFIX) and e.name.endswith(".json")]
+        all_entries = list(os.scandir(folder))
     except OSError:
         return 0
+    entries = [e for e in all_entries
+               if e.name.startswith(REQ_PREFIX) and e.name.endswith(".json")]
+    _remove_stale(e for e in all_entries if e.name.startswith(RES_PREFIX))
     for e in entries:
         p = Path(e.path)
         try:
             req = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue  # 書きかけ。次の周回で読む
-        p.unlink(missing_ok=True)
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:  # Windows: ウイルス対策・OneDrive が開いている瞬間。次の周回で読み直す
+            continue
         rid = str(req.get("id", ""))
         if not rid.replace("_", "").isalnum():
             continue
         _write_atomic(folder / f"{RES_PREFIX}{rid}.json", handle(req, shell))
         n += 1
     return n
+
+
+def _remove_stale(entries) -> None:
+    """拡張がタイムアウトで諦めて拾わなかった答えを消す（OneDrive 等の同期対象に溜めない）"""
+    now = time.time()
+    for e in entries:
+        try:
+            if now - e.stat().st_mtime > STALE_SEC:
+                os.unlink(e.path)
+        except OSError:
+            pass
 
 
 _thread: threading.Thread | None = None

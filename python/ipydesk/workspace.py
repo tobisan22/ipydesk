@@ -15,6 +15,7 @@ ipydesk.workspace — ワークスペースビュー（MATLAB の「ワークス
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import os
@@ -34,7 +35,64 @@ MINMAX_LIMIT = 1_000_000  # これを超える配列は min/max を計算しな�
 # IPython が名前空間に置く変数のうち、user_ns_hidden で隠れないもの
 _IPY_NAMES = {"In", "Out", "exit", "quit", "get_ipython"}
 
-_repr = reprlib.Repr()
+class SafeRepr(reprlib.Repr):
+    """reprlib.Repr の安全版。
+
+    reprlib は list / dict の中身を表示するとき、要素ごとに repr() を最後まで作ってから
+    切り詰める。中身が DataFrame・ndarray だと、表示に使うのは先頭の数十文字なのに、
+    表全体の文字列（pandas の表示上限を外していると数 MB）を毎回作ってしまう。
+    配列・表は repr を呼ばずに「<DataFrame 10000×52>」の形で済ませる。
+    """
+
+    def repr_instance(self, x, level):
+        short = array_summary(x)
+        if short is not None:
+            return short
+        return super().repr_instance(x, level)
+
+
+def array_summary(x: Any) -> str | None:
+    """配列・表なら repr を呼ばずに作る短い表示。それ以外は None"""
+    t = type(x)
+    mod = (t.__module__ or "").split(".")[0]
+    if mod not in ("numpy", "pandas", "polars", "xarray", "torch", "scipy"):
+        return None
+    shape = getattr(x, "shape", None)
+    if not _is_shape(shape) or len(shape) == 0:
+        return None  # numpy のスカラーなど（repr は短い）
+    return f"<{t.__name__} {'×'.join(str(n) for n in shape)}>"
+
+
+@contextlib.contextmanager
+def display_limits():
+    """要約を作る間だけ、pandas / numpy の表示を小さく制限する。
+
+    利用者が pd.set_option("display.max_rows", None) などで上限を外していても、
+    ワークスペースビュー・Variable Editor のために巨大な文字列を作らないようにする
+    （ユーザー定義クラスの __repr__ が中で DataFrame を表示する場合なども含む）。
+    import 済みのものだけを触る（使っていないライブラリを読み込まない）。
+    """
+    with contextlib.ExitStack() as st:
+        pd = sys.modules.get("pandas")
+        if pd is not None:
+            try:
+                st.enter_context(pd.option_context(
+                    "display.max_rows", 10, "display.min_rows", 6,
+                    "display.max_columns", 10, "display.width", 200,
+                    "display.max_colwidth", 40, "display.max_seq_items", 20,
+                ))
+            except Exception:
+                pass
+        np = sys.modules.get("numpy")
+        if np is not None:
+            try:
+                st.enter_context(np.printoptions(threshold=50, edgeitems=3, linewidth=200))
+            except Exception:
+                pass
+        yield
+
+
+_repr = SafeRepr()
 _repr.maxstring = MAX_TEXT
 _repr.maxother = MAX_TEXT
 _repr.maxlist = _repr.maxtuple = _repr.maxset = _repr.maxfrozenset = 6
@@ -205,6 +263,11 @@ def children(v: Any) -> tuple[list[tuple[str, Any]], int] | None:
 
 def snapshot(ns: dict, hidden: dict | set | None = None, scope: str = "base") -> list[dict]:
     """ns の変数一覧を作る。前回の同じスコープと比べて new / chg の印を付ける"""
+    with display_limits():
+        return _snapshot(ns, hidden, scope)
+
+
+def _snapshot(ns: dict, hidden: dict | set | None, scope: str) -> list[dict]:
     hidden = hidden or ()
     names = sorted(
         (n for n, v in list(ns.items()) if n not in hidden and is_visible(n, v)),

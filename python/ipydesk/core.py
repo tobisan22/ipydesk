@@ -24,6 +24,7 @@ import re
 import shlex
 import sys
 import textwrap
+import threading
 import time
 import traceback
 from bdb import BdbQuit
@@ -107,6 +108,51 @@ _trace_runs = 0
 
 # ブレークポイント・事後デバッグで停止中のデバッガ（Variable Editor がそのフレームの変数を見る）
 active_debugger = None
+
+# Variable Editor（別スレッド）が変数を読んでよい状態か。
+#   True : IPython のプロンプト待ち / ipdb のプロンプト待ち（停止中）
+#   False: セル・スクリプト・停止中のコマンド（n / c / p x など）を実行中
+# メインスレッドは実行を始める前に ns_lock を取って False にするので、
+# 別スレッドが読んでいる途中なら、読み終わるまで実行の再開を待つ。
+ns_lock = threading.Lock()
+ns_ready = True
+
+
+def set_ready(ready: bool) -> None:
+    global ns_ready
+    with ns_lock:
+        ns_ready = ready
+
+
+# ---- 端末に流す表示の上限 ----------------------------------------------------------
+# プロンプト・ipdb で変数名を打ったときの表示（Out[n] / 停止中の式の表示 / p / pp）が
+# 巨大だと、VS Code のターミナル（xterm.js・Windows では ConPTY も）が固まり、
+# ウィンドウごと落ちることがある（pandas の表示上限を外した DataFrame 全体など）。
+# 上限を超えた分は打ち切って知らせる。0 で無制限。VS Code 設定 ipydesk.maxOutputChars。
+MAX_OUTPUT_DEFAULT = 200_000
+
+
+def max_output() -> int:
+    try:
+        return max(0, int(os.environ.get("IPYDESK_MAX_OUTPUT", MAX_OUTPUT_DEFAULT)))
+    except ValueError:
+        return MAX_OUTPUT_DEFAULT
+
+
+def clip_output(text: str, limit: int | None = None) -> str:
+    """表示する文字列が上限を超えていたら、先頭だけにして知らせる"""
+    limit = max_output() if limit is None else limit
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = text[:limit]
+    nl = head.rfind("\n")
+    if nl > limit // 2:  # 行の途中で切らない
+        head = head[:nl]
+    return (
+        f"{head}\n[ipydesk] 表示が長すぎるため、{len(text):,} 文字のうち先頭の"
+        f" {len(head):,} 文字だけ表示しました（VS Code のターミナルが固まるのを防ぐため）。"
+        "全体は Variable Editor で見られます。上限は設定 ipydesk.maxOutputChars（0 で無制限）"
+    )
 
 
 def out_dir(vscode_dir: Path | None) -> Path | None:
@@ -287,6 +333,41 @@ def find_vscode_dir(start: Path) -> Path | None:
     return None
 
 
+class _LimitedWriter:
+    """書き込みの合計が上限を超えたら、それ以降を捨てて最後に知らせる（ipdb のコマンド 1 回分）"""
+
+    def __init__(self, out, limit: int):
+        self._out, self._limit, self._n, self._dropped = out, limit, 0, 0
+
+    def write(self, s):
+        if self._limit <= 0 or not isinstance(s, str):
+            return self._out.write(s)
+        room = self._limit - self._n
+        if len(s) <= room:
+            self._n += len(s)
+            return self._out.write(s)
+        if room > 0:
+            self._out.write(s[:room])
+            self._n = self._limit
+        self._dropped += len(s) - max(room, 0)
+        return len(s)
+
+    def finish(self) -> None:
+        if self._dropped:
+            self._out.write(
+                f"\n[ipydesk] 表示が長すぎるため、{self._n + self._dropped:,} 文字のうち先頭の"
+                f" {self._n:,} 文字だけ表示しました（VS Code のターミナルが固まる・落ちるのを防ぐため）。"
+                "全体は Variable Editor で見られます。上限は設定 ipydesk.maxOutputChars（0 で無制限）\n"
+            )
+            self._out.flush()
+
+    def flush(self):
+        return self._out.flush()
+
+    def __getattr__(self, name):  # encoding / isatty / fileno など
+        return getattr(self._out, name)
+
+
 class VsPdb(Pdb):
     def __init__(
         self,
@@ -455,7 +536,26 @@ class VsPdb(Pdb):
         finally:
             self._from_hit = False
 
+    def default(self, line):
+        # 停止中に打った文・式（print(df) / df.to_dict() など）の出力に上限をかける。
+        # pdb は実行の間だけ sys.stdout を self.stdout に差し替えるので、ここを包めば print も対象になる
+        real = self.stdout
+        limited = _LimitedWriter(real, max_output())
+        self.stdout = limited
+        try:
+            return super().default(line)
+        finally:
+            self.stdout = real
+            limited.finish()
+
+    def message(self, msg, *args, **kw):
+        # 停止中に打った式の表示（displayhook）と p / pp はここを通る
+        if isinstance(msg, str):
+            msg = clip_output(msg)
+        return super().message(msg, *args, **kw)
+
     def precmd(self, line: str) -> str:
+        set_ready(False)  # ここから先はコマンドの実行（Variable Editor は読まない）
         self.sync_breakpoints()  # c / n / s 等の直前に最新の赤丸へ揃える
         apply_figure_closes(self.out_dir)  # 停止中に閉じたタブの図へ描き足さない
         return super().precmd(line)
@@ -509,13 +609,17 @@ class VsPdb(Pdb):
             fighist.set_label(f"⏸ {Path(frame.f_code.co_filename).name}:{frame.f_lineno}")
             notify_figures(self.out_dir, only_if_changed=True)
         super().preloop()
+        set_ready(True)  # プロンプト待ち。Variable Editor がこのフレームの変数を読める
 
     def postcmd(self, stop, line):
         if not stop:  # `x = 3` や `p x` など、停止したまま打ったコマンドの後
             self._write_workspace()
             fighist.set_label(f"ipdb> {line}")
             notify_figures(self.out_dir, only_if_changed=True)  # 停止中に描いた図もタブに出す
-        return super().postcmd(stop, line)
+        r = super().postcmd(stop, line)
+        if not stop:
+            set_ready(True)  # 停止したままプロンプトへ戻る
+        return r
 
     # u / d でフレームを移ったら、そのフレームの変数に切り替える
     def do_up(self, arg):
@@ -541,6 +645,7 @@ class VsPdb(Pdb):
         try:
             super().interaction(frame, tb_or_exc)
         finally:
+            set_ready(False)  # 再開する（読み途中の Variable Editor を待ってから）
             active_debugger = prev
             self._clear_state()
 
@@ -960,6 +1065,7 @@ def load_ipython_extension(ip):
         workspace.write(vsdir, ip.user_ns, hidden=ip.user_ns_hidden)
 
     def mark_busy(info=None, *_):
+        set_ready(False)  # Variable Editor が読み終わるのを待ってから実行に入る
         write_session(True)
         apply_figure_closes(vsdir)  # 閉じたタブの図へ plt.plot が描き足さないよう、実行前に閉じる
         start_figure_history(vsdir)  # プロンプトで打ったループの途中の図も履歴に残す
@@ -972,6 +1078,22 @@ def load_ipython_extension(ip):
         update_workspace()
         notify_figures(vsdir, only_if_changed=True)  # プロンプトで描いた図もタブに出す
         fighist.report_skipped()
+        set_ready(True)
+
+    # プロンプトで打った式の表示（Out[n]）にも上限をかける
+    dh = getattr(ip, "displayhook", None)
+    orig_write = getattr(dh, "write_format_data", None)
+    if orig_write is not None:
+
+        def write_format_data(format_dict, md_dict=None):
+            text = format_dict.get("text/plain") if isinstance(format_dict, dict) else None
+            if isinstance(text, str):
+                clipped = clip_output(text)
+                if clipped is not text:
+                    format_dict = {**format_dict, "text/plain": clipped}
+            return orig_write(format_dict, md_dict)
+
+        dh.write_format_data = write_format_data
 
     # F5 / セル実行（%ipydesk・%ipydesk_cell もセルの 1 つ）/ プロンプトで打った 1 行、すべての前後
     ip.events.register("pre_run_cell", mark_busy)

@@ -169,6 +169,12 @@
           "minimum": 0,
           "description": "同じ figure を描き直したとき、前の図を Figure タブの上側に残す枚数（figure ごと）。0 で残さない。変更は新しいセッションから有効"
         },
+        "ipydesk.maxOutputChars": {
+          "type": "number",
+          "default": 200000,
+          "minimum": 0,
+          "description": "IPyDesk のコンソールで変数名を打ったときなどの表示（Out[n]・停止中の式の表示・p / pp）の上限文字数。超えた分は打ち切ってお知らせします。巨大な表示で VS Code のターミナルが固まる・落ちるのを防ぎます。0 で無制限。変更は新しいセッションから有効"
+        },
         "ipydesk.breakpointMode": {
           "type": "string",
           "enum": ["inject", "trace"],
