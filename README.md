@@ -44,6 +44,7 @@ MATLAB のように「実行 → 変数を確認 → 一部だけ実行し直す
 | **Shift+F5** | 停止中: デバッガを抜けてプロンプトへ |
 | **Ctrl+Shift+F5** | New Session：空のセッションを 1 つ追加する（既存のセッションはそのまま、スクリプトは実行しない） |
 | **Ctrl+C** | Figure タブ: 図を画像としてコピー |
+| **F5**（エクスプローラー） | 選んでいる `.bat` / `.cmd` / `.exe` / `.ps1` をターミナルで実行（下の「ファイルを実行する」） |
 
 ## セル実行
 
@@ -159,6 +160,19 @@ Workspace ビューで配列・DataFrame・Series・list を**ダブルクリッ
 セッションが無ければ空のセッションを起動し、閉じていた Figure タブも開き直します。
 Workspace を右側に置きたい場合は、ビューをセカンダリ サイド バーへドラッグしてください（VS Code が位置を覚えます）。
 
+## ファイルを実行する（.bat / .exe など）
+
+エクスプローラーで `.bat` / `.cmd` / `.exe` / `.ps1` を選んで **F5**、または右クリックから実行できます。
+
+- **IPyDesk: Run File in Terminal**（F5）: VS Code のターミナルを開き、**そのファイルのフォルダで**実行します。
+  終わってもターミナルは残るので、出力を読んだり続けて入力したりできます。ターミナル名は `▶ ファイル名` です。
+  同じファイルをもう一度実行すると、前のターミナルを閉じて作り直します（動いている処理も止まります）
+- **IPyDesk: Run File (Like Double-Click)**: エクスプローラーでダブルクリックしたのと同じく、Windows の関連付けで起動します。VS Code とは切り離されます
+- 複数選んで実行すると、それぞれ実行します。エディタで開いていて未保存なら、保存してから実行します
+- エディタで `.bat` などを開いているときも、F5・右上の ▶・タブの右クリックから実行できます
+- `.ps1` は PowerShell（`-ExecutionPolicy Bypass`）で、ほかは cmd で実行します
+- 対象の拡張子は `ipydesk.runFileExtraExtensions` で増やせます（例: `[".vbs", ".py"]`。`.py` を足すと、エクスプローラーの F5 は関連付けの Python で実行します。エディタの F5 はこれまでどおり IPyDesk の実行です）
+
 ## メモ（Notes ビュー）
 
 アクティビティバーの IPyDesk に **NOTES** があり、セクションに分けてメモを書けます。
@@ -193,6 +207,7 @@ NOTES 右上の「…」→「**IPyDesk: Restore Default Notes**」で、消し�
 | `ipydesk.webaggPort` | `8988` | 図の表示に使うポート |
 | `ipydesk.figureHistory` | `20` | 描き直した図を Figure タブに残す枚数（figure ごと。0 で無効） |
 | `ipydesk.showCellDecorations` | `true` | `# %%` の区切り線とセルの強調を表示する |
+| `ipydesk.runFileExtraExtensions` | `[]` | エクスプローラーから実行できるファイルに足す拡張子（`.bat` `.cmd` `.exe` `.ps1` は常に対象） |
 | `ipydesk.useBundledPython` | `true` | 同梱の `ipydesk` を使う（通常は変更不要） |
 
 `figureDisplay` を変えたら、通知の「置き換える」を押すか、Ctrl+Shift+F5 で新しいセッションを作ってください。

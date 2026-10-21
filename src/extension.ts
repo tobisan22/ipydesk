@@ -37,6 +37,7 @@ import { WORKSPACE_NAME, WorkspaceViewProvider, WsData } from "./workspaceView";
 import { NotesViewProvider } from "./notesView";
 import { VariableEditor, VarQuery } from "./variableEditor";
 import { FigureInfo, figureHtml } from "./figurePanel";
+import { registerRunFile } from "./runFile";
 
 const BP_NAME = "py_breakpoints.json";
 const STATE_NAME = "py_debug_state.json";
@@ -2051,6 +2052,9 @@ export function activate(context: vscode.ExtensionContext) {
       await startSession(undefined, undefined, s?.id);
     }),
   );
+
+  // ---- エクスプローラーのファイルを実行（.bat / .exe など）----
+  registerRunFile(context);
 
   setStopped(false);
   updateFigureTabsContext();

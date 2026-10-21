@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
   "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
   "homepage": "https://github.com/tobisan22/ipydesk#readme",
@@ -53,13 +53,17 @@
       { "command": "ipydesk.openDesk", "title": "IPyDesk: Open Desk", "icon": "$(layout)" },
       { "command": "ipydesk.openNotesFile", "title": "IPyDesk: Open Notes File", "icon": "$(go-to-file)" },
       { "command": "ipydesk.addToNotes", "title": "IPyDesk: Add Selection to Notes", "icon": "$(note)" },
-      { "command": "ipydesk.restoreDefaultNotes", "title": "IPyDesk: Restore Default Notes", "icon": "$(history)" }
+      { "command": "ipydesk.restoreDefaultNotes", "title": "IPyDesk: Restore Default Notes", "icon": "$(history)" },
+      { "command": "ipydesk.runFileInTerminal", "title": "IPyDesk: Run File in Terminal", "icon": "$(play)" },
+      { "command": "ipydesk.runFileExternally", "title": "IPyDesk: Run File (Like Double-Click)", "icon": "$(link-external)" }
     ],
     "jsonValidation": [
       { "fileMatch": "**/.vscode/ipydesk_args.json", "url": "./resources/ipydesk_args.schema.json" }
     ],
     "keybindings": [
       { "command": "ipydesk.run",      "key": "f5",             "when": "editorLangId == python && !ipydesk.stopped && !inDebugMode" },
+      { "command": "ipydesk.runFileInTerminal", "key": "f5", "args": { "source": "explorer" }, "when": "filesExplorerFocus && !inputFocus && !explorerResourceIsFolder && (resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)" },
+      { "command": "ipydesk.runFileInTerminal", "key": "f5", "args": { "source": "editor" },   "when": "editorTextFocus && editorLangId != python && !ipydesk.stopped && !inDebugMode && (resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)" },
       { "command": "ipydesk.runCell",           "key": "ctrl+enter",       "when": "editorTextFocus && editorLangId == python && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible" },
       { "command": "ipydesk.runCellAndAdvance", "key": "shift+enter",      "when": "editorTextFocus && editorLangId == python && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible" },
       { "command": "ipydesk.runSelection",      "key": "ctrl+shift+enter", "when": "editorTextFocus && editorLangId == python && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible" },
@@ -76,6 +80,8 @@
     ],
     "menus": {
       "commandPalette": [
+        { "command": "ipydesk.runFileInTerminal", "when": "(resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)" },
+        { "command": "ipydesk.runFileExternally", "when": "(resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)" },
         { "command": "ipydesk.openFigures", "when": "!ipydesk.noFigureTabs" },
         { "command": "ipydesk.copyFigure",  "when": "!ipydesk.noFigureTabs" }
       ],
@@ -84,6 +90,14 @@
         { "command": "ipydesk.openDesk",     "when": "view == ipydesk.workspace", "group": "navigation@2" },
         { "command": "ipydesk.openNotesFile", "when": "view == ipydesk.notes", "group": "navigation@1" },
         { "command": "ipydesk.restoreDefaultNotes", "when": "view == ipydesk.notes", "group": "1_notes@1" }
+      ],
+      "explorer/context": [
+        { "command": "ipydesk.runFileInTerminal", "when": "!explorerResourceIsFolder && (resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)", "group": "navigation@90" },
+        { "command": "ipydesk.runFileExternally", "when": "!explorerResourceIsFolder && (resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)", "group": "navigation@91" }
+      ],
+      "editor/title/context": [
+        { "command": "ipydesk.runFileInTerminal", "when": "(resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)", "group": "9_ipydesk@1" },
+        { "command": "ipydesk.runFileExternally", "when": "(resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)", "group": "9_ipydesk@2" }
       ],
       "editor/context": [
         { "command": "ipydesk.addToNotes", "when": "editorTextFocus", "group": "9_ipydesk@1" }
@@ -94,7 +108,8 @@
       "editor/title/run": [
         { "command": "ipydesk.run", "when": "editorLangId == python", "group": "navigation@0" },
         { "command": "ipydesk.runInNewSession", "when": "editorLangId == python", "group": "navigation@1" },
-        { "command": "ipydesk.runWithArgs", "when": "editorLangId == python", "group": "navigation@2" }
+        { "command": "ipydesk.runWithArgs", "when": "editorLangId == python", "group": "navigation@2" },
+        { "command": "ipydesk.runFileInTerminal", "when": "editorLangId != python && (resourceExtname =~ /^\\.(bat|cmd|exe|ps1)$/i || resourceExtname in ipydesk.runFileExts)", "group": "navigation@0" }
       ],
       "editor/title": [
         { "command": "ipydesk.stop",     "when": "editorLangId == python && ipydesk.stopped", "group": "navigation@0" },
@@ -174,6 +189,12 @@
           "type": "boolean",
           "default": true,
           "description": "`# %%` の行に区切り線を引き、カーソルのあるセルを薄く強調する"
+        },
+        "ipydesk.runFileExtraExtensions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "エクスプローラーの F5 / 右クリックで実行できるファイルに追加する拡張子（例: `[\".vbs\", \".py\"]`）。`.bat` `.cmd` `.exe` `.ps1` は常に対象。追加した拡張子は Windows の関連付けで起動する"
         },
         "ipydesk.autoOpenFigures": {
           "type": "boolean",

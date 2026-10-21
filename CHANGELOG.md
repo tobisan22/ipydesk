@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-21
+
+### Added
+
+- エクスプローラーで選んだ `.bat` / `.cmd` / `.exe` / `.ps1` を実行できるようにしました。**F5** または右クリックの `IPyDesk: Run File in Terminal` で、そのファイルのフォルダを作業フォルダにしてターミナルで実行します。`IPyDesk: Run File (Like Double-Click)` は Windows の関連付けで起動します。エディタで開いているときも F5・▶ ボタンから実行できます。拡張子は `ipydesk.runFileExtraExtensions` で追加できます。
+
 ## [0.1.4] - 2026-10-15
 
 ### Fixed
