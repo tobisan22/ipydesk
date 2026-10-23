@@ -1409,19 +1409,37 @@ export function activate(context: vscode.ExtensionContext) {
     if (advance) { moveCursor(ed, cell.end); }   // 次のセルの先頭（= 区切り行）へ
   };
 
+  /**
+   * 停止中のセッションで、行範囲をそのフレーム（停止位置のローカル変数）で実行する。
+   * pdb のコマンド ipydesk_run を送り、Python 側がファイルから範囲を読んで実行する
+   * （複数行・字下げ付きの選択も 1 行のコマンドで送れる）
+   */
+  const runRangeStopped = async (s: Session, doc: vscode.TextDocument, start: number, end: number) => {
+    await doc.save();
+    s.lastUsed = Date.now();
+    s.terminal.show(true);
+    s.terminal.sendText(`ipydesk_run "${doc.uri.fsPath}" ${start} ${end}`);
+  };
+
   const runSelectionOrLine = async () => {
     const ed = pythonEditor();
     if (!ed) { return; }
     const sel = ed.selection;
+    let start = sel.active.line + 1, end = start;
     if (!sel.isEmpty) {
       // 行頭で終わる選択（行全体をドラッグした形）は、その行を含めない
       const endLine = sel.end.character === 0 && sel.end.line > sel.start.line
         ? sel.end.line - 1 : sel.end.line;
-      await runRange(ed.document, sel.start.line + 1, endLine + 1);
-      return;
+      start = sel.start.line + 1;
+      end = endLine + 1;
     }
-    await runRange(ed.document, sel.active.line + 1, sel.active.line + 1);
-    moveCursor(ed, sel.active.line + 1);   // 1 行ずつ試せるよう次の行へ
+    const a = active();
+    if (a?.stopped && isAlive(a)) {
+      await runRangeStopped(a, ed.document, start, end);   // 停止中: そのフレームで実行
+    } else {
+      await runRange(ed.document, start, end);
+    }
+    if (sel.isEmpty) { moveCursor(ed, sel.active.line + 1); }   // 1 行ずつ試せるよう次の行へ
   };
 
   // ---- キーバインドの競合解消 ----
@@ -1434,11 +1452,17 @@ export function activate(context: vscode.ExtensionContext) {
   const CELL_KEY_WHEN =
     "editorTextFocus && editorLangId == python"
     + " && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible";
+  // 選択範囲 / 現在行は停止中も使える（停止位置のフレームで実行する）
+  const SELECTION_KEY_WHEN =
+    "editorTextFocus && editorLangId == python && !inDebugMode && !suggestWidgetVisible";
   const CELL_KEY_RULES = [
     { key: "ctrl+enter", command: "ipydesk.runCell", when: CELL_KEY_WHEN },
     { key: "shift+enter", command: "ipydesk.runCellAndAdvance", when: CELL_KEY_WHEN },
-    { key: "ctrl+shift+enter", command: "ipydesk.runSelection", when: CELL_KEY_WHEN },
+    { key: "ctrl+shift+enter", command: "ipydesk.runSelection", when: SELECTION_KEY_WHEN },
   ];
+  // 0.1.5 までに keybindings.json へ書き込んだ Ctrl+Shift+Enter（停止中は効かない）
+  const OLD_SELECTION_RULE = JSON.stringify(
+    { key: "ctrl+shift+enter", command: "ipydesk.runSelection", when: CELL_KEY_WHEN });
 
   const keyRulesText = () =>
     CELL_KEY_RULES.map(r => "  " + JSON.stringify(r)).join(",\n");
@@ -1463,6 +1487,15 @@ export function activate(context: vscode.ExtensionContext) {
     }
     const text = doc.getText();
     if (text.includes("ipydesk.runCell")) {
+      const i = text.indexOf(OLD_SELECTION_RULE);
+      if (i >= 0) {   // 古い Ctrl+Shift+Enter を、停止中も効く条件に書き換える
+        const r = new vscode.Range(doc.positionAt(i), doc.positionAt(i + OLD_SELECTION_RULE.length));
+        await ed.edit(b => b.replace(r, JSON.stringify(CELL_KEY_RULES[2])));
+        await doc.save();
+        vscode.window.showInformationMessage(
+          "IPyDesk: Ctrl+Shift+Enter を停止中も使えるように更新しました");
+        return;
+      }
       vscode.window.showInformationMessage("IPyDesk: セル実行のキー設定は既に追加されています");
       return;
     }

@@ -487,6 +487,8 @@ class VsPdb(Pdb):
     # --- 埋め込んだ呼び出しからの停止 ---------------------------------------------
     def inject_hit(self, key, frame) -> None:
         """__ipydesk_bp__ / __ipydesk_bp_cond__ から呼ばれる。有効な赤丸なら frame で止まる"""
+        if getattr(self, "_snippet", False):  # 停止中の Ctrl+Shift+Enter の実行中は止まらない
+            return
         cond = self.inj_conds.get(key, _MISSING)
         if cond is _MISSING:  # 外された・無効にされた・今回の実行の対象ではない
             return
@@ -546,6 +548,60 @@ class VsPdb(Pdb):
             return super().default(line)
         finally:
             self.stdout = real
+            limited.finish()
+
+    # --- 停止中の行・選択範囲の実行（Ctrl+Shift+Enter） --------------------------
+    def do_ipydesk_run(self, arg):
+        """ipydesk_run "<file>" <start> <end>
+        file の start..end 行（1 始まり・両端含む）を、停止中のフレームで実行する。
+        拡張が Ctrl+Shift+Enter で送る。複数行・字下げ付きの選択もそのまま実行でき、
+        末尾が式ならその値を表示する。範囲の中の赤丸では止まらない"""
+        self.lastcmd = ""  # 空 Enter で同じ範囲を実行し直さない
+        try:
+            path, start, end = arg.strip().rsplit(None, 2)
+            script = Path(path.strip().strip('"')).resolve()
+            start, end = int(start), int(end)
+        except ValueError:
+            self.error('usage: ipydesk_run "<file>" <start> <end>')
+            return
+        try:
+            lines = script.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError as e:
+            self.error(f"ipydesk: cannot read {script}: {e}")
+            return
+        start = max(1, start)
+        end = min(len(lines), end)
+        src = "".join(lines[start - 1 : end])
+        if start > end or not src.strip():
+            return
+        try:
+            code, tail = compile_range(src, start, str(script))
+        except SyntaxError as e:
+            self.message("".join(traceback.format_exception_only(type(e), e)).rstrip())
+            return
+
+        frame = self.curframe
+        ns_locals = getattr(self, "curframe_locals", None)
+        if ns_locals is None:
+            ns_locals = frame.f_locals
+        ns_globals = frame.f_globals
+        real_out, real_in, real_hook = sys.stdout, sys.stdin, sys.displayhook
+        limited = _LimitedWriter(self.stdout, max_output())
+        self._snippet = True  # 埋め込んだ赤丸の呼び出しで、入れ子の停止に入らない
+        try:
+            sys.stdout = limited
+            sys.stdin = self.stdin
+            exec(code, ns_globals, ns_locals)
+            if tail is not None:
+                value = eval(tail, ns_globals, ns_locals)
+                if value is not None:
+                    self.message(repr(value))
+        except Exception as e:
+            tb = e.__traceback__.tb_next if e.__traceback__ else None  # この関数の枠は出さない
+            limited.write("".join(traceback.format_exception(type(e), e, tb)))
+        finally:
+            sys.stdout, sys.stdin, sys.displayhook = real_out, real_in, real_hook
+            self._snippet = False
             limited.finish()
 
     def message(self, msg, *args, **kw):

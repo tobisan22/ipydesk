@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-23
+
+### Added
+
+- ブレークポイントで停止中も **Ctrl+Shift+Enter** で選択範囲（選択が無ければ現在行）を実行できるようにしました。停止位置のフレーム（ローカル変数）で実行し、末尾が式なら値を表示します。字下げ付き・複数行の選択もそのまま実行できます。範囲の中の赤丸では止まりません。以前 `IPyDesk: Use IPyDesk Cell Keys` で keybindings.json に書き込んだ場合は、もう一度実行すると停止中も効く条件に書き換えます。
+
+### Fixed
+
+- 大きな DataFrame で停止中に VS Code が固まる・落ちる問題を対策しました。
+  - 停止中に打った式・文の出力（Out[n] / 式の表示 / `p` / `pp` / `print`）に上限を設けました（設定 `ipydesk.maxOutputChars`、既定 200,000 文字、0 で無制限）。`df.to_dict()` などの巨大な出力でターミナルごと落ちるのを防ぎます。
+  - ワークスペースビュー・Variable Editor の要約で、list / tuple / dict の中の DataFrame・ndarray の repr を呼ばないようにしました。表示上限を外していると停止のたびに数秒〜数十秒固まっていました。
+  - Variable Editor が値を読むのを、プロンプト待ち・停止中だけにしました（実行中の変数を別スレッドから読む競合をなくしました）。
+
 ## [0.1.5] - 2026-10-21
 
 ### Added
