@@ -10,7 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- ブレークポイントで停止中も **Ctrl+Shift+Enter** で選択範囲（選択が無ければ現在行）を実行できるようにしました。停止位置のフレーム（ローカル変数）で実行し、末尾が式なら値を表示します。字下げ付き・複数行の選択もそのまま実行できます。範囲の中の赤丸では止まりません。以前 `IPyDesk: Use IPyDesk Cell Keys` で keybindings.json に書き込んだ場合は、もう一度実行すると停止中も効く条件に書き換えます。
+- ブレークポイントで停止中も **Ctrl+Shift+Enter** で選択範囲（選択が無ければ現在行）を実行できるようにしました。停止位置のフレーム（ローカル変数）で実行し、末尾が式なら値を表示します。字下げ付き・複数行の選択もそのまま実行できます。範囲の中の赤丸では止まりません。
+
+### Changed
+
+- `IPyDesk: Use IPyDesk Cell Keys` で keybindings.json に書き込むキーを Ctrl+Enter / Shift+Enter だけにしました。Ctrl+Shift+Enter は他の拡張と重ならないため、書き込まなくても使えます（以前書き込んだ設定はそのままで動きます）。
 
 ### Fixed
 
@@ -169,7 +173,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- 旧名 PyBP（pybp 0.4.5）から IPyDesk に名前を変更し、バージョンを 0.0.1 から数え直しました。機能は pybp 0.4.5 と同じです。
-  - コマンド ID・設定キー・ビュー ID の接頭辞を `pybp.` から `ipydesk.` に変更しました（例: `pybp.figureDisplay` → `ipydesk.figureDisplay`）。
-  - Python パッケージ名を `pybp` から `ipydesk` に変更しました（`python -m ipydesk`）。
-  - 環境変数を `PYBP_*` から `IPYDESK_*` に変更しました。
+- 初回リリース。

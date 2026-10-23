@@ -1452,17 +1452,12 @@ export function activate(context: vscode.ExtensionContext) {
   const CELL_KEY_WHEN =
     "editorTextFocus && editorLangId == python"
     + " && !ipydesk.stopped && !inDebugMode && !suggestWidgetVisible";
-  // 選択範囲 / 現在行は停止中も使える（停止位置のフレームで実行する）
-  const SELECTION_KEY_WHEN =
-    "editorTextFocus && editorLangId == python && !inDebugMode && !suggestWidgetVisible";
+  // Ctrl+Shift+Enter（選択範囲 / 現在行）は Jupyter / Python 拡張と被らないので書き込まない。
+  // package.json の割り当てだけで、停止中も含めて効く
   const CELL_KEY_RULES = [
     { key: "ctrl+enter", command: "ipydesk.runCell", when: CELL_KEY_WHEN },
     { key: "shift+enter", command: "ipydesk.runCellAndAdvance", when: CELL_KEY_WHEN },
-    { key: "ctrl+shift+enter", command: "ipydesk.runSelection", when: SELECTION_KEY_WHEN },
   ];
-  // 0.1.5 までに keybindings.json へ書き込んだ Ctrl+Shift+Enter（停止中は効かない）
-  const OLD_SELECTION_RULE = JSON.stringify(
-    { key: "ctrl+shift+enter", command: "ipydesk.runSelection", when: CELL_KEY_WHEN });
 
   const keyRulesText = () =>
     CELL_KEY_RULES.map(r => "  " + JSON.stringify(r)).join(",\n");
@@ -1487,15 +1482,6 @@ export function activate(context: vscode.ExtensionContext) {
     }
     const text = doc.getText();
     if (text.includes("ipydesk.runCell")) {
-      const i = text.indexOf(OLD_SELECTION_RULE);
-      if (i >= 0) {   // 古い Ctrl+Shift+Enter を、停止中も効く条件に書き換える
-        const r = new vscode.Range(doc.positionAt(i), doc.positionAt(i + OLD_SELECTION_RULE.length));
-        await ed.edit(b => b.replace(r, JSON.stringify(CELL_KEY_RULES[2])));
-        await doc.save();
-        vscode.window.showInformationMessage(
-          "IPyDesk: Ctrl+Shift+Enter を停止中も使えるように更新しました");
-        return;
-      }
       vscode.window.showInformationMessage("IPyDesk: セル実行のキー設定は既に追加されています");
       return;
     }
@@ -1514,7 +1500,7 @@ export function activate(context: vscode.ExtensionContext) {
     await ed.edit(b => b.insert(doc.positionAt(close), snippet));
     await doc.save();
     vscode.window.showInformationMessage(
-      "IPyDesk: Ctrl+Enter / Shift+Enter / Ctrl+Shift+Enter を IPyDesk のセル実行に割り当てました");
+      "IPyDesk: Ctrl+Enter / Shift+Enter を IPyDesk のセル実行に割り当てました");
   };
 
   /** Jupyter / Python 拡張が入っていれば、最初の1回だけ割り当てを提案する */
