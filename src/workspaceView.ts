@@ -95,7 +95,7 @@ function html(cspSource: string): string {
   .where { padding: 2px 8px 4px; font-size: 11px; color: var(--vscode-descriptionForeground); }
   .where.stopped { color: var(--vscode-debugIcon-pauseForeground, var(--vscode-charts-orange)); }
   table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  th { text-align: left; font-weight: normal; font-size: 11px; padding: 2px 6px;
+  th { position: relative; text-align: left; font-weight: normal; font-size: 11px; padding: 2px 6px;
        color: var(--vscode-descriptionForeground);
        border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #8884)); }
   td { padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -118,6 +118,11 @@ function html(cspSource: string): string {
   .legend { padding: 6px 10px; font-size: 11px; color: var(--vscode-descriptionForeground);
             display: flex; gap: 12px; flex-wrap: wrap; }
   col.c-name { width: 24%; } col.c-size { width: 14%; } col.c-cls { width: 28%; }
+  /* 列幅のドラッグ調整（境界をドラッグ / ダブルクリックで既定に戻す） */
+  .rz { position: absolute; top: 0; right: -3px; width: 7px; height: 100%; cursor: col-resize; z-index: 1; }
+  .rz::after { content: ""; position: absolute; top: 2px; bottom: 2px; left: 2px; width: 2px; border-radius: 1px; }
+  .rz:hover::after, .rz.on::after { background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder)); }
+  body.resizing, body.resizing * { cursor: col-resize !important; user-select: none; }
   @media (max-width: 300px) { .c-size, .sz { display: none; } col.c-cls { width: 32%; } }
 </style></head><body>
 <div class="bar"><input id="filter" placeholder="フィルター（名前・クラス）" spellcheck="false"></div>
@@ -135,7 +140,20 @@ $("filter").value = filter;
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-const save = () => vscode.setState({ filter, open: [...open] });
+const save = () => vscode.setState({ filter, open: [...open], colW });
+
+// ---- 列幅（％で保持。値の列は残り幅。null は CSS の既定） ----
+const COLS = ["c-name", "c-val", "c-size", "c-cls"];
+const DEF_W = [24, 34, 14, 28];
+let colW = Array.isArray(saved.colW) && saved.colW.length === 4 ? saved.colW : null;
+const colStyle = document.createElement("style");
+document.head.appendChild(colStyle);
+function applyColW() {
+  colStyle.textContent = colW
+    ? [0, 2, 3].map(i => "col." + COLS[i] + "{width:" + colW[i].toFixed(2) + "%}").join("")
+    : "";
+}
+applyColW();
 
 /** 展開した子の式: x[0] / d['k'] / obj.attr */
 function kidExpr(parent, k) {
@@ -162,6 +180,8 @@ function row(v, kid, parent) {
     + '<td class="cls">' + esc(v.cls) + "</td></tr>";
 }
 
+const RZ = '<span class="rz" title="ドラッグで列幅を調整（ダブルクリックで既定に戻す）"></span>';
+
 function render() {
   const where = $("where");
   if (!data) {
@@ -178,8 +198,9 @@ function render() {
     $("list").innerHTML = '<div class="empty">' + (data.vars.length ? "一致する変数はありません" : "変数はありません") + "</div>";
     return;
   }
-  let h = '<table><colgroup><col class="c-name"><col><col class="c-size"><col class="c-cls"></colgroup>'
-    + '<thead><tr><th>名前</th><th>値</th><th class="c-size">サイズ</th><th>クラス</th></tr></thead><tbody>';
+  let h = '<table><colgroup><col class="c-name"><col class="c-val"><col class="c-size"><col class="c-cls"></colgroup>'
+    + '<thead><tr><th>名前' + RZ + '</th><th>値' + RZ + '</th><th class="c-size">サイズ' + RZ
+    + '</th><th>クラス</th></tr></thead><tbody>';
   for (const v of vars) {
     h += row(v, false);
     if (v.kids && open.has(v.name)) {
@@ -226,6 +247,42 @@ $("list").addEventListener("click", e => {
   sel = n;
   render();
 });
+// 境界のドラッグ: 左の列と右隣（表示中）の列で幅をやり取りする。合計は表の幅のまま
+let drag = null;
+$("list").addEventListener("mousedown", e => {
+  const h = e.target.closest(".rz");
+  if (!h || e.button !== 0) { return; }
+  e.preventDefault();
+  if (e.detail >= 2) { colW = null; applyColW(); save(); return; }   // ダブルクリックで既定へ
+  const ths = [...h.closest("tr").children];
+  const w = ths.map(th => th.getBoundingClientRect().width);
+  const i = ths.indexOf(h.parentElement);
+  let j = i + 1;
+  while (j < ths.length && w[j] === 0) { j++; }                       // 狭幅時に隠れたサイズ列は飛ばす
+  if (j >= ths.length) { return; }
+  drag = { x: e.clientX, w, i, j, total: h.closest("table").getBoundingClientRect().width, h };
+  h.classList.add("on");
+  document.body.classList.add("resizing");
+});
+function endDrag() {
+  if (!drag) { return; }
+  drag.h.classList.remove("on");
+  drag = null;
+  document.body.classList.remove("resizing");
+  save();
+}
+document.addEventListener("mousemove", e => {
+  if (!drag) { return; }
+  if (e.buttons === 0) { endDrag(); return; }                         // ビュー外で離した場合
+  const MIN = 28;
+  const { w, i, j, total } = drag;
+  const dx = Math.max(MIN - w[i], Math.min(w[j] - MIN, e.clientX - drag.x));
+  const nw = w.slice(); nw[i] += dx; nw[j] -= dx;
+  const prev = colW || DEF_W;
+  colW = nw.map((v, k) => v === 0 ? prev[k] : v / total * 100);       // 隠れた列は前の値を保つ
+  applyColW();
+});
+document.addEventListener("mouseup", endDrag);
 window.addEventListener("message", e => {
   if (e.data && e.data.type === "data") { data = e.data.data; render(); }
 });
