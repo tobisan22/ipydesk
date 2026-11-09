@@ -30,6 +30,7 @@ export interface WsData {
   stopped: boolean;
   where: string | null;
   vars: WsVar[];
+  total?: number;          // 上限（500 件）で切る前の変数の数（0.1.9 以降の Python）
 }
 
 export class WorkspaceViewProvider implements vscode.WebviewViewProvider {
@@ -110,6 +111,7 @@ function html(cspSource: string): string {
   .op-ic { opacity: 0; margin-left: 5px; color: var(--vscode-textLink-foreground); cursor: pointer; }
   tr.row.op:hover .op-ic { opacity: .9; }
   .more td { color: var(--vscode-descriptionForeground); font-style: italic; padding-left: 24px; }
+  .more-all { padding: 4px 12px 8px; font-size: 12px; color: var(--vscode-descriptionForeground); font-style: italic; }
   .badge { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
            margin-left: 5px; vertical-align: middle; }
   .badge.new { background: var(--vscode-charts-green); }
@@ -194,8 +196,13 @@ function render() {
   where.textContent = data.stopped ? "⏸ " + data.scope + " — " + data.where : data.scope;
   const f = filter.trim().toLowerCase();
   const vars = data.vars.filter(v => !f || (v.name + " " + v.cls).toLowerCase().includes(f));
+  const more = (data.total || 0) - data.vars.length;
+  const moreRow = more > 0
+    ? '<div class="more-all">… 他 ' + more.toLocaleString() + " 件（表示は " + data.vars.length.toLocaleString()
+      + " 件まで" + (f ? "。フィルターは表示中の変数だけに効きます" : "") + "）</div>"
+    : "";
   if (vars.length === 0) {
-    $("list").innerHTML = '<div class="empty">' + (data.vars.length ? "一致する変数はありません" : "変数はありません") + "</div>";
+    $("list").innerHTML = '<div class="empty">' + (data.vars.length ? "一致する変数はありません" : "変数はありません") + "</div>" + moreRow;
     return;
   }
   let h = '<table><colgroup><col class="c-name"><col class="c-val"><col class="c-size"><col class="c-cls"></colgroup>'
@@ -208,7 +215,7 @@ function render() {
       if (v.more) { h += '<tr class="more"><td colspan="4">… 他 ' + v.more + " 件</td></tr>"; }
     }
   }
-  h += "</tbody></table>";
+  h += "</tbody></table>" + moreRow;
   if (vars.some(v => v.mark)) {
     h += '<div class="legend"><span><span class="badge new"></span> 新規</span>'
       + '<span><span class="badge chg"></span> 直前の実行・ステップで変更</span></div>';

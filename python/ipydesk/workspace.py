@@ -102,6 +102,7 @@ _repr.maxlevel = 2
 # スコープごとの前回スナップショット（変更マークの判定用）
 _previous: dict[str, dict[str, tuple]] = {}
 _seq = 0
+_last_total = 0  # 直前の snapshot で、上限（MAX_VARS）で切る前の変数の数
 
 
 def _clip(s: str) -> str:
@@ -268,11 +269,14 @@ def snapshot(ns: dict, hidden: dict | set | None = None, scope: str = "base") ->
 
 
 def _snapshot(ns: dict, hidden: dict | set | None, scope: str) -> list[dict]:
+    global _last_total
     hidden = hidden or ()
     names = sorted(
         (n for n, v in list(ns.items()) if n not in hidden and is_visible(n, v)),
         key=str.lower,
-    )[:MAX_VARS]
+    )
+    _last_total = len(names)
+    names = names[:MAX_VARS]
 
     prev = _previous.get(scope)
     now: dict[str, tuple] = {}
@@ -331,6 +335,7 @@ def write(
             "where": where,
             "vars": snapshot(ns, hidden, scope),
         }
+        data["total"] = _last_total  # 上限で切る前の数（ビューが「… 他 N 件」を出す）
         target = vscode_dir / WORKSPACE_NAME
         tmp = vscode_dir / (WORKSPACE_NAME + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

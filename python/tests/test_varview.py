@@ -122,3 +122,121 @@ def test_workspace_marks_openable():
     assert got["a"].get("open") and got["L"].get("open")
     assert not got["s"].get("open") and not got["n"].get("open")
     assert got["d"]["kids"][0].get("open"), "展開した子も開ける"
+
+
+# ---- 0.1.9: 行の高さ（full）・列名・統計・インスペクタ ----------------------------------
+
+
+def test_block_full_keeps_newlines_and_raises_limit():
+    long = "a" * 500
+    df = pd.DataFrame({"s": ["line1\nline2", long, "x\r\ny"]})
+    b = varview.block(df, 0, 3, 0, 1)
+    assert b["cells"][0] == ["line1 line2"], "既定では改行を詰める"
+    assert len(b["cells"][1][0]) == varview.MAX_TEXT
+    b = varview.block(df, 0, 3, 0, 1, full=[0, 1, 2, 99])
+    assert b["full"] == [0, 1, 2], "範囲外の行番号は無視する"
+    assert b["cells"][0] == ["line1\nline2"]
+    assert b["cells"][1] == [long]
+    assert b["cells"][2] == ["x\ny"]
+    b = varview.block(["p\nq", "r\ns"], 0, 2, 0, 1, full=[1])
+    assert b["cells"] == [["p q"], ["r\ns"]], "full の行だけ"
+
+
+def test_full_text_is_still_capped():
+    b = varview.block(["z" * 5000], 0, 1, 0, 1, full=[0])
+    assert len(b["cells"][0][0]) == varview.MAX_FULL_TEXT
+
+
+def test_zero_length_page_axis_is_empty():
+    a = np.zeros((3, 2, 0))
+    i = varview.info(a)
+    assert (i["rows"], i["shape"]) == (0, [3, 2, 0])
+    assert varview.block(a, 0, 10, 0, 10)["cells"] == []
+    assert varview.copy_text(a, 0, 10, 0, 10) == ""
+
+
+def test_collabels():
+    df = pd.DataFrame({"time": [1.0], "alt_m": [2.0]})
+    assert varview.collabels(df) == {"labels": ["time", "alt_m"], "count": 2}
+    assert varview.collabels(pd.Series([1], name="x"))["labels"] == ["x"]
+    assert varview.collabels(np.zeros((2, 3))) == {"labels": None, "count": 3}
+    wide = pd.DataFrame(np.zeros((1, varview.MAX_LABELS + 1)))
+    assert varview.collabels(wide)["labels"] is None, "上限を超えたら列番号で覚える"
+
+
+def test_stats_real_matches_numpy():
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(100, 5))
+    a[3, 1] = np.nan
+    a[4, 2] = np.inf
+    s = varview.stats(a, 10, 60, 1, 4)
+    sub = a[10:60, 1:4]
+    assert s["kind"] == "real" and s["n"] == sub.size
+    assert (s["nan"], s["inf"]) == (0, 0)
+    assert s["min"] == pytest.approx(np.nanmin(sub))
+    assert s["mean"] == pytest.approx(np.nanmean(sub))
+    assert s["std"] == pytest.approx(np.nanstd(sub, ddof=1)), "std は N−1"
+    s = varview.stats(a, 0, 10, 0, 5)
+    assert (s["nan"], s["inf"], s["max"], s["mean"]) == (1, 1, "Inf", "Inf")
+    json.dumps(s, allow_nan=False)   # NaN・Inf は JSON に出せる形
+
+
+def test_stats_special_kinds():
+    s = varview.stats(np.array([[True, False], [True, True]]), 0, 2, 0, 2)
+    assert (s["kind"], s["n"], s["true"]) == ("bool", 4, 3)
+    s = varview.stats(np.array([1 + 1j, 3 - 1j]), 0, 2, 0, 1)
+    assert s["kind"] == "complex" and s["mean"] == [2.0, 0.0] and s["absmax"] == pytest.approx(10 ** 0.5)
+    s = varview.stats(np.full((2, 2), np.nan), 0, 2, 0, 2)
+    assert s["nan"] == 4 and s["mean"] is None
+    assert varview.stats(np.zeros((3, 3)), 1, 1, 0, 3)["kind"] == "none", "空の選択"
+    assert varview.stats(np.array(["a", "b"]), 0, 2, 0, 1)["kind"] == "none"
+    s = varview.stats(np.arange(10, dtype=np.int64) * 10**17, 0, 10, 0, 1)
+    assert s["mean"] == pytest.approx(4.5e17), "整数は float64 で集計"
+
+
+def test_stats_dataframe_uses_numeric_columns_only():
+    df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "s": ["x", "y", "z"], "b": [4, 5, 6]})
+    s = varview.stats(df, 0, 3, 0, 3)
+    assert (s["numCols"], s["allCols"], s["n"]) == (2, 3, 6)
+    assert s["max"] == 6.0
+    assert varview.stats(df, 0, 3, 1, 2)["kind"] == "none"
+
+
+def test_stats_pages_and_limit(monkeypatch):
+    a = np.arange(24, dtype=float).reshape(2, 3, 4)
+    s = varview.stats(a, 0, 2, 0, 3, page=[1])
+    assert s["min"] == 1.0 and s["max"] == 21.0
+    monkeypatch.setattr(varview, "MAX_STATS_CELLS", 5)
+    with pytest.raises(ValueError):
+        varview.stats(a, 0, 2, 0, 3, page=[1])
+
+
+def test_cell_returns_full_value():
+    df = pd.DataFrame({"s": ["x" * 300 + "\nend"], "f": [0.1 + 0.2]})
+    c = varview.cell(df, 0, 0)
+    assert c["text"].endswith("\nend") and c["len"] == 304 and c["type"] == "str"
+    assert varview.cell(df, 0, 1)["text"] == repr(0.1 + 0.2)
+    assert varview.cell([[1, 2, [3]]], 0, 0)["text"] == "[1, 2, [3]]"
+    assert varview.cell(np.arange(24).reshape(2, 3, 4), 1, 2, page=[3])["text"] == "23"
+    with pytest.raises(IndexError):
+        varview.cell(df, 5, 0)
+
+
+def test_handle_new_ops_and_unknown(monkeypatch):
+    monkeypatch.setattr(core, "ns_ready", True)
+    sh = Shell({"df": pd.DataFrame({"a": [1.0, 2.0]})})
+    r = varview.handle({"id": "1", "op": "collabels", "expr": "df"}, sh)
+    assert r["ok"] and r["labels"] == ["a"]
+    r = varview.handle({"id": "2", "op": "stats", "expr": "df", "r0": 0, "r1": 2, "c0": 0, "c1": 1}, sh)
+    assert r["ok"] and r["stats"]["mean"] == 1.5
+    r = varview.handle({"id": "3", "op": "cell", "expr": "df", "r": 1, "c": 0}, sh)
+    assert r["ok"] and r["cell"]["text"] == "2.0"
+    r = varview.handle({"id": "4", "op": "nope", "expr": "df"}, sh)
+    assert not r["ok"] and "op" in r["error"]
+
+
+def test_workspace_total_counts_before_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(workspace, "MAX_VARS", 3)
+    workspace.write(tmp_path, {f"v{i}": i for i in range(5)})
+    data = json.loads((tmp_path / workspace.WORKSPACE_NAME).read_text(encoding="utf-8"))
+    assert len(data["vars"]) == 3 and data["total"] == 5

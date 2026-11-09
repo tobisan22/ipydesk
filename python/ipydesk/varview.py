@@ -35,6 +35,10 @@ MAX_ROWS = 1000  # 1 回に返す行数の上限
 MAX_COLS = 200  # 1 回に返す列数の上限
 MAX_COPY_CELLS = 200_000  # コピー（TSV）で返すセル数の上限
 MAX_TEXT = 80  # セル 1 つの表示文字数の上限
+MAX_FULL_TEXT = 2000  # 高くした行（full）のセル 1 つの表示文字数の上限。改行は残す
+MAX_CELL_TEXT = 100_000  # インスペクタ（op cell）で返す文字数の上限
+MAX_LABELS = 10_000  # collabels で返す列名の数の上限
+MAX_STATS_CELLS = 20_000_000  # 統計（op stats）で読むセル数の上限
 POLL_SEC = 0.05
 
 STALE_SEC = 60  # 拡張がタイムアウトで諦めた答え（拾われない py_varres_*）を消すまでの秒数
@@ -46,21 +50,44 @@ _repr.maxlist = _repr.maxtuple = 4
 _repr.maxdict = 3
 _repr.maxlevel = 1
 
+# 高くした行（full）の repr。表のセルに収まる程度に広げる
+_repr_full = workspace.SafeRepr()
+_repr_full.maxstring = _repr_full.maxother = MAX_FULL_TEXT
+_repr_full.maxlist = _repr_full.maxtuple = 50
+_repr_full.maxdict = 30
+_repr_full.maxlevel = 3
+
+# インスペクタ（op cell）の repr。全文を見るためのものなので大きく取る
+_repr_cell = workspace.SafeRepr()
+_repr_cell.maxstring = _repr_cell.maxother = MAX_CELL_TEXT
+_repr_cell.maxlist = _repr_cell.maxtuple = _repr_cell.maxset = 1000
+_repr_cell.maxdict = 500
+_repr_cell.maxlevel = 6
+
 
 def _clip(s: str) -> str:
     s = " ".join(str(s).split())
     return s if len(s) <= MAX_TEXT else s[: MAX_TEXT - 1] + "…"
 
 
+def _clip_full(s: str) -> str:
+    """改行を残したまま MAX_FULL_TEXT で切る（折り返し表示用）"""
+    s = str(s).replace("\r\n", "\n").replace("\r", "\n")
+    return s if len(s) <= MAX_FULL_TEXT else s[: MAX_FULL_TEXT - 1] + "…"
+
+
 # ---- セル 1 つの表示 ------------------------------------------------------------
 
 
-def fmt(x: Any) -> str:
-    """セルに出す文字列。数値は MATLAB の format short g に近い 6 桁"""
+def fmt(x: Any, full: bool = False) -> str:
+    """セルに出す文字列。数値は MATLAB の format short g に近い 6 桁
+
+    full=True は高くした行（折り返して表示する行）用。文字列の改行を残し、上限を広げる
+    """
     if x is None:
         return "None"
     if isinstance(x, str):
-        return _clip(x)
+        return _clip_full(x) if full else _clip(x)
     t = type(x)
     if isinstance(x, bool) or (t.__module__ == "numpy" and t.__name__ in ("bool_", "bool")):
         return "True" if x else "False"
@@ -77,7 +104,7 @@ def fmt(x: Any) -> str:
         c = complex(x)
         return f"{c.real:.4g}{c.imag:+.4g}j"
     try:
-        return _clip(_repr.repr(x))
+        return _clip_full(_repr_full.repr(x)) if full else _clip(_repr.repr(x))
     except Exception as e:  # 壊れた __repr__
         return f"<{type(e).__name__}>"
 
@@ -115,6 +142,8 @@ def info(v: Any) -> dict:
             shape = list(v.shape)
             rows = shape[0] if v.ndim >= 1 else 1
             cols = shape[1] if v.ndim >= 2 else 1
+            if 0 in shape[2:]:  # 3 次元目以降に大きさ 0 の軸: 選べるページが無いので空の表
+                rows = 0
             return {
                 **base,
                 "kind": "ndarray",
@@ -182,31 +211,45 @@ def _span(lo: int, hi: int, n: int, cap: int) -> tuple[int, int]:
     return lo, hi
 
 
-def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None) -> dict:
-    """[r0, r1) × [c0, c1) の範囲を文字列の 2 次元リストで返す（範囲は形に合わせて詰める）"""
+def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None,
+          full: list[int] | None = None) -> dict:
+    """[r0, r1) × [c0, c1) の範囲を文字列の 2 次元リストで返す（範囲は形に合わせて詰める）
+
+    full: 行番号のリスト。その行のセルは改行を残し、上限を MAX_FULL_TEXT に広げる
+    （Variable Editor で高くした行。折り返して表示する）
+    """
     inf = info(v)
     kind = inf["kind"]
     r0, r1 = _span(r0, r1, inf["rows"], MAX_ROWS)
     c0, c1 = _span(c0, c1, inf["cols"], MAX_COLS)
     out: dict[str, Any] = {"r0": r0, "r1": r1, "c0": c0, "c1": c1}
+    fullset = {int(r) for r in (full or ()) if r0 <= int(r) < r1}
+    if fullset:
+        out["full"] = sorted(fullset)
+
+    def row(r: int, xs) -> list[str]:
+        f = r in fullset
+        return [fmt(x, f) for x in xs]
 
     if kind == "ndarray":
         a = v
-        if a.ndim == 0:
-            cells = [[fmt(a.item())]] if (r1 > r0 and c1 > c0) else []
+        if inf["rows"] == 0:
+            cells = []
+        elif a.ndim == 0:
+            cells = [row(0, [a.item()])] if (r1 > r0 and c1 > c0) else []
         elif a.ndim == 1:
-            cells = [[fmt(x)] for x in a[r0:r1]] if c1 > c0 else [[] for _ in range(r1 - r0)]
+            cells = [row(r0 + i, [x]) if c1 > c0 else [] for i, x in enumerate(a[r0:r1])]
         else:
             idx = tuple(_page_index(page, a.shape[2:]))
             sub = a[(slice(r0, r1), slice(c0, c1)) + idx]
-            cells = [[fmt(x) for x in row] for row in sub]
+            cells = [row(r0 + i, xs) for i, xs in enumerate(sub)]
         out["cells"] = cells
         return out
 
     if kind == "dataframe":
         sub = v.iloc[r0:r1, c0:c1]
         cols = [sub.iloc[:, j].to_numpy(dtype=object) for j in range(sub.shape[1])]
-        out["cells"] = [[fmt(col[i]) for col in cols] for i in range(sub.shape[0])]
+        out["cells"] = [row(r0 + i, [col[i] for col in cols]) for i in range(sub.shape[0])]
         out["rowLabels"] = [fmt(x) for x in sub.index]
         out["colLabels"] = [fmt(x) for x in sub.columns]
         return out
@@ -214,17 +257,186 @@ def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = N
     if kind == "series":
         sub = v.iloc[r0:r1]
         vals = sub.to_numpy(dtype=object)
-        out["cells"] = [[fmt(x)] if c1 > c0 else [] for x in vals]
+        out["cells"] = [row(r0 + i, [x]) if c1 > c0 else [] for i, x in enumerate(vals)]
         out["rowLabels"] = [fmt(x) for x in sub.index]
         out["colLabels"] = [fmt(v.name) if v.name is not None else "0"]
         return out
 
     if kind == "list":
-        out["cells"] = [[fmt(x)] if c1 > c0 else [] for x in v[r0:r1]]
+        out["cells"] = [row(r0 + i, [x]) if c1 > c0 else [] for i, x in enumerate(v[r0:r1])]
         return out
 
-    out["cells"] = [[fmt(v)]] if (r1 > r0 and c1 > c0) else []
+    out["cells"] = [row(0, [v])] if (r1 > r0 and c1 > c0) else []
     return out
+
+
+def collabels(v: Any) -> dict:
+    """列名の一覧（列幅を列名で覚えるため）。上限を超えたら labels は None"""
+    inf = info(v)
+    if inf["kind"] == "dataframe":
+        n = v.shape[1]
+        if n > MAX_LABELS:
+            return {"labels": None, "count": n}
+        return {"labels": [fmt(x) for x in v.columns], "count": n}
+    if inf["kind"] == "series":
+        return {"labels": [fmt(v.name) if v.name is not None else "0"], "count": 1}
+    return {"labels": None, "count": inf["cols"]}
+
+
+# ---- 選択範囲の統計（op stats） ---------------------------------------------------
+
+
+def _jnum(x: Any) -> Any:
+    """JSON に出せる数値。NaN は None、±Inf は文字列"""
+    f = float(x)
+    if f != f:
+        return None
+    if f in (float("inf"), float("-inf")):
+        return "Inf" if f > 0 else "-Inf"
+    return f
+
+
+def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None):
+    """統計に使う値（ndarray）と、数値の列数・全列数。数値が無ければ値は None"""
+    import numpy as np
+
+    inf = info(v)
+    kind = inf["kind"]
+    r0, r1 = _span(r0, r1, inf["rows"], MAX_STATS_CELLS)
+    c0, c1 = _span(c0, c1, inf["cols"], MAX_STATS_CELLS)
+    all_cols = c1 - c0
+    if (r1 - r0) * max(1, all_cols) > MAX_STATS_CELLS:
+        raise ValueError(f"統計を計算できるのは {MAX_STATS_CELLS:,} セルまでです")
+    if r1 <= r0 or c1 <= c0:
+        return None, 0, all_cols
+
+    def num(a):
+        a = np.asarray(a)
+        return a if _is_numeric_dtype(a.dtype) else None
+
+    if kind == "ndarray":
+        if v.ndim == 0:
+            a = num(v.reshape(1))
+        elif v.ndim == 1:
+            a = num(v[r0:r1])
+        else:
+            idx = tuple(_page_index(page, v.shape[2:]))
+            a = num(v[(slice(r0, r1), slice(c0, c1)) + idx])
+        return a, (all_cols if a is not None else 0), all_cols
+    if kind == "dataframe":
+        sub = v.iloc[r0:r1, c0:c1]
+        keep = [j for j, dt in enumerate(sub.dtypes) if isinstance(dt, np.dtype) and _is_numeric_dtype(dt)]
+        if not keep:
+            return None, 0, all_cols
+        dts = [sub.dtypes.iloc[j] for j in keep]
+        if all(np.issubdtype(dt, np.bool_) for dt in dts):
+            target = bool
+        elif any(np.issubdtype(dt, np.complexfloating) for dt in dts):
+            target = complex
+        else:
+            target = float
+        return sub.iloc[:, keep].to_numpy(dtype=target), len(keep), all_cols
+    if kind == "series":
+        dt = v.dtype
+        if not (isinstance(dt, np.dtype) and _is_numeric_dtype(dt)):
+            return None, 0, all_cols
+        return v.iloc[r0:r1].to_numpy(), 1, 1
+    if kind == "list":
+        xs = v[r0:r1]
+        if not all(isinstance(x, numbers.Number) for x in xs):
+            return None, 0, all_cols
+        a = np.asarray(xs)
+        return (a, 1, 1) if _is_numeric_dtype(a.dtype) else (None, 0, all_cols)
+    if isinstance(v, numbers.Number):
+        return np.asarray([v]), 1, 1
+    return None, 0, all_cols
+
+
+def stats(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None) -> dict:
+    """選択範囲の統計。std は N−1（MATLAB の std と同じ）"""
+    import numpy as np
+
+    a, num_cols, all_cols = _stats_data(v, r0, r1, c0, c1, page)
+    out: dict[str, Any] = {"numCols": num_cols, "allCols": all_cols}
+    if a is None or a.size == 0:
+        out["kind"] = "none"
+        return out
+    out["n"] = int(a.size)
+    if np.issubdtype(a.dtype, np.bool_):
+        out["kind"] = "bool"
+        out["true"] = int(np.count_nonzero(a))
+        return out
+    if np.issubdtype(a.dtype, np.complexfloating):
+        out["kind"] = "complex"
+        with np.errstate(all="ignore"):
+            m = np.nanmean(a) if a.size else complex("nan")
+            absmax = np.nanmax(np.abs(a)) if a.size else float("nan")
+        out["mean"] = [_jnum(m.real), _jnum(m.imag)]
+        out["absmax"] = _jnum(absmax)
+        return out
+    out["kind"] = "real"
+    f = a.astype(np.float64, copy=False)   # 整数は float64 で集計する（合計のあふれを避ける）
+    nan = int(np.count_nonzero(np.isnan(f)))
+    inf = int(np.count_nonzero(np.isinf(f)))
+    out["nan"], out["inf"] = nan, inf
+    if nan == f.size:
+        out.update(min=None, max=None, mean=None, std=None)
+        return out
+    import warnings
+
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out["min"] = _jnum(np.nanmin(f))
+        out["max"] = _jnum(np.nanmax(f))
+        out["mean"] = _jnum(np.nanmean(f))
+        out["std"] = _jnum(np.nanstd(f, ddof=1)) if f.size - nan > 1 else None
+    return out
+
+
+# ---- セル 1 つの全文（インスペクタ、op cell） -----------------------------------------
+
+
+def _element(v: Any, r: int, c: int, page: list[int] | None) -> Any:
+    inf = info(v)
+    if not (0 <= r < inf["rows"] and 0 <= c < inf["cols"]):
+        raise IndexError(f"範囲外です（{r}, {c}）")
+    kind = inf["kind"]
+    if kind == "ndarray":
+        if v.ndim == 0:
+            return v.item()
+        if v.ndim == 1:
+            return v[r]
+        return v[(r, c) + tuple(_page_index(page, v.shape[2:]))]
+    if kind == "dataframe":
+        return v.iat[r, c]
+    if kind == "series":
+        return v.iat[r]
+    if kind == "list":
+        return v[r]
+    return v
+
+
+def cell(v: Any, r: int, c: int, page: list[int] | None = None) -> dict:
+    """セル 1 つの値を丸めずに返す（文字列は全文、数値は repr）"""
+    x = _element(v, int(r), int(c), page)
+    t = type(x)
+    tname = t.__name__ if t.__module__ in ("builtins", None) else f"{t.__module__.split('.')[0]}.{t.__name__}"
+    if _mod(x) == "numpy" and isinstance(x, numbers.Number):
+        x = x.item()   # np.int64(23) ではなく 23 と出す（型は tname に残す）
+    if isinstance(x, str):
+        text = x
+    elif isinstance(x, numbers.Real) and not isinstance(x, numbers.Integral):
+        text = repr(float(x))
+    elif isinstance(x, numbers.Complex) and not isinstance(x, numbers.Real):
+        text = repr(complex(x))
+    else:
+        try:
+            text = _repr_cell.repr(x)
+        except Exception as e:  # 壊れた __repr__
+            text = f"<{type(e).__name__}>"
+    cut = len(text) > MAX_CELL_TEXT
+    return {"text": text[:MAX_CELL_TEXT], "type": tname, "len": len(x) if isinstance(x, str) else None,
+            "cut": cut}
 
 
 def _page_index(page: list[int] | None, dims: list[int] | tuple) -> list[int]:
@@ -248,7 +460,9 @@ def copy_text(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None
         return str(x)
 
     rows: list[list[Any]]
-    if kind == "ndarray":
+    if inf["rows"] == 0:
+        rows = []
+    elif kind == "ndarray":
         if v.ndim == 0:
             rows = [[v.item()]]
         elif v.ndim == 1:
@@ -333,7 +547,15 @@ def _handle(req: dict, shell=None) -> dict:
         if op == "copy":
             res["text"] = copy_text(v, req["r0"], req["r1"], req["c0"], req["c1"], page)
         elif op == "block":
-            res["block"] = block(v, req["r0"], req["r1"], req["c0"], req["c1"], page)
+            res["block"] = block(v, req["r0"], req["r1"], req["c0"], req["c1"], page, req.get("full"))
+        elif op == "collabels":
+            res.update(collabels(v))
+        elif op == "stats":
+            res["stats"] = stats(v, req["r0"], req["r1"], req["c0"], req["c1"], page)
+        elif op == "cell":
+            res["cell"] = cell(v, req["r"], req["c"], page)
+        else:
+            raise ValueError(f"知らない op です: {op}")
         return res
     except Exception as e:
         return {"id": rid, "ok": False, "error": f"{type(e).__name__}: {e}"}

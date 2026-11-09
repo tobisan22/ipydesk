@@ -35,7 +35,7 @@ import * as http from "http";
 import { execFile } from "child_process";
 import { WORKSPACE_NAME, WorkspaceViewProvider, WsData } from "./workspaceView";
 import { NotesViewProvider } from "./notesView";
-import { VariableEditor, VarQuery } from "./variableEditor";
+import { VariableEditor, VarLayout, VarMenuCmd, VarQuery } from "./variableEditor";
 import { FigureInfo, figureHtml } from "./figurePanel";
 import { registerRunFile } from "./runFile";
 
@@ -49,6 +49,8 @@ const FIG_CLOSE_PREFIX = "py_figclose_";            // 拡張 → Python : 利�
 const VAR_REQ_PREFIX = "py_varreq_";                // 拡張 → Python : Variable Editor の問い合わせ
 const VAR_RES_PREFIX = "py_varres_";                // Python → 拡張 : その答え
 const VAR_TIMEOUT_MS = 5000;
+const VAR_LAYOUT_KEY = "ipydesk.varEditor.layout";   // workspaceState: 式 → 列幅・行の高さ・倍率
+const VAR_LAYOUT_MAX = 200;                         // 覚える式の数（古いものから消す）
 
 // ipydesk 本体は同梱するが、これらは利用者の Python に入っている必要がある
 const REQUIRED_MODULES = [
@@ -1867,7 +1869,7 @@ export function activate(context: vscode.ExtensionContext) {
   const varEditors: VariableEditor[] = [];
   let varSeq = 0;
 
-  const queryVar = async (sid: number, q: VarQuery): Promise<any> => {
+  const queryVar = async (sid: number, q: VarQuery, timeoutMs = VAR_TIMEOUT_MS): Promise<any> => {
     const s = sessions.get(sid);
     if (!s || !isAlive(s)) { throw new Error("セッションが終了しています"); }
     const id = `${Date.now().toString(36)}_${(varSeq++).toString(36)}`;
@@ -1876,7 +1878,7 @@ export function activate(context: vscode.ExtensionContext) {
     const tmp = req + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify({ id, ...q }), "utf8");
     fs.renameSync(tmp, req);       // 書きかけを読ませない
-    const until = Date.now() + VAR_TIMEOUT_MS;
+    const until = Date.now() + timeoutMs;
     for (let wait = 15; Date.now() < until; wait = Math.min(wait * 1.5, 100)) {
       await new Promise(r => setTimeout(r, wait));
       let text: string;
@@ -1912,6 +1914,18 @@ export function activate(context: vscode.ExtensionContext) {
     s.terminal.sendText(code);
   };
 
+  /** 式ごとの見た目（列幅など）。開くたびに t を新しくする */
+  const varLayouts = () => context.workspaceState.get<Record<string, VarLayout>>(VAR_LAYOUT_KEY, {});
+  const saveVarLayout = (expr: string, data: VarLayout) => {
+    const all = { ...varLayouts(), [expr]: { ...data, t: Date.now() } };
+    const keys = Object.keys(all);
+    if (keys.length > VAR_LAYOUT_MAX) {
+      keys.sort((a, b) => (all[a].t ?? 0) - (all[b].t ?? 0));
+      for (const k of keys.slice(0, keys.length - VAR_LAYOUT_MAX)) { delete all[k]; }
+    }
+    void context.workspaceState.update(VAR_LAYOUT_KEY, all);
+  };
+
   const openVariable = (expr: string, s: Session | undefined = active()) => {
     expr = expr.trim();
     if (!expr) { return; }
@@ -1923,14 +1937,18 @@ export function activate(context: vscode.ExtensionContext) {
     const open = varEditors.find(v => v.sid === s.id && v.expr === expr);
     if (open) { open.reveal(); return; }
     const title = sessions.size > 1 || s.id !== 1 ? `${expr} (${s.name})` : expr;
+    const layout = varLayouts()[expr];
+    if (layout) { saveVarLayout(expr, layout); }   // 使った日時を新しくする
+    const zoom = vscode.workspace.getConfiguration("ipydesk").get<number>("variableEditor.zoom", 100);
     const ed = new VariableEditor(expr, s.id, title, figureColumn(), {
       query: queryVar,
       run: runInSession,
+      saveLayout: saveVarLayout,
       closed: e => {
         const i = varEditors.indexOf(e);
         if (i >= 0) { varEditors.splice(i, 1); }
       },
-    });
+    }, layout, zoom);
     varEditors.push(ed);
   };
   workspaceView.onOpen = expr => openVariable(expr);
@@ -1970,6 +1988,11 @@ export function activate(context: vscode.ExtensionContext) {
       if (typeof x === "string") { return openVariable(x); }
       return pickVariable();
     }),
+    // Variable Editor の列見出し・行見出しの右クリックメニュー（webview/context）
+    ...(["colAutoFit", "colReset", "colResetAll", "rowAutoFit", "rowReset", "rowResetAll"] as VarMenuCmd[]).map(cmd =>
+      vscode.commands.registerCommand(`ipydesk.varEditor.${cmd}`, (ctx?: { col?: unknown; row?: unknown }) => {
+        varEditors.find(v => v.panel.active)?.menu(cmd, ctx);
+      })),
   );
 
   // ---- Open Desk: MATLAB 風の配置 ----
