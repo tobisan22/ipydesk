@@ -128,6 +128,7 @@ export function html(cspSource: string, expr: string): string {
   #grid { position: relative; flex: 1; overflow: auto; outline: none;
           font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
   #spacer { position: absolute; top: 0; left: 0; width: 1px; height: 1px; }
+  #layer { position: absolute; top: 0; left: 0; overflow: hidden; }
   .c, .h { position: absolute; box-sizing: border-box; height: 22px; line-height: 21px; padding: 0 6px;
            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
            border-right: 1px solid var(--vscode-editorGroup-border, #8883);
@@ -177,6 +178,12 @@ ${plotCode.toString()}
 const RH = 22, HH = 22;          // 行の高さ・列見出しの高さ
 const BR = 100, BC = 25;         // 問い合わせる単位（行・列）
 let CW = 96, RW = 56;            // 列の幅・行見出しの幅
+// ブラウザは要素の長さに上限がある（Chromium で約 3,355 万 px。22px の行なら約 150 万行）。
+// 表の長さが LIM を超えるときは #spacer を LIM に抑え、スクロールバーの位置を縮尺して
+// 表の中の位置（実位置）に読み替える。実位置は pos に持ち、ホイール・キー操作は実位置で動かす
+// （scrollTop は整数に丸められるので、縮尺したままだと 1 行ずつ動かせない）
+const LIM = 15000000;
+const pos = { y: 0, x: 0, st: 0, sl: 0 };   // 実位置と、それを置いたときの scrollTop / scrollLeft
 let info = null, scope = "";
 let page = [];
 let gen = 0;                     // 変数が変わるたびに増やす（古い答えを見分ける）
@@ -223,7 +230,7 @@ function onResult(reqId, res) {
   if (info.labels && res.block.rowLabels) {   // 行ラベル（日時など）が切れないよう、幅を広げる（狭めはしない）
     const len = Math.max(0, ...res.block.rowLabels.map(x => String(x).length));
     const w = Math.min(200, 14 + 8 * len);
-    if (w > RW) { RW = w; $("spacer").style.width = (RW + info.cols * CW) + "px"; }
+    if (w > RW) { RW = w; sizeSpacer(); }
   }
   if (p.gen === gen) {
     cache.set(p.key, { gen: p.gen, ...res.block });
@@ -249,9 +256,49 @@ function setInfo(i) {
     if (i.rows === 0 || i.cols === 0) { sel = null; }
     else { sel = { ar: cl(sel.ar, i.rows), ac: cl(sel.ac, i.cols), fr: cl(sel.fr, i.rows), fc: cl(sel.fc, i.cols) }; }
   }
-  $("spacer").style.width = (RW + i.cols * CW) + "px";
-  $("spacer").style.height = (HH + i.rows * RH) + "px";
+  sizeSpacer();
   renderMeta();
+}
+
+// ---- 実位置と縮尺 ----
+function totalH() { return info.rows * RH; }
+function totalW() { return info.cols * CW; }
+function viewH() { return Math.max(0, grid.clientHeight - HH); }
+function viewW() { return Math.max(0, grid.clientWidth - RW); }
+function sizeSpacer() {
+  // layer も同じ大きさで切る（縮尺中はセルが #spacer の外にはみ出し、スクロール範囲が広がるため）
+  const w = (RW + Math.min(totalW(), LIM)) + "px", h = (HH + Math.min(totalH(), LIM)) + "px";
+  for (const el of [$("spacer"), layer]) { el.style.width = w; el.style.height = h; }
+}
+/** 実位置 ÷ スクロール位置。表が LIM 以下なら 1 */
+function ratio(total, view) {
+  const s = Math.min(total, LIM);
+  return total > s && s > view ? (total - view) / (s - view) : 1;
+}
+const clampTo = (v, total, view) => Math.max(0, Math.min(v, Math.max(0, total - view)));
+/** スクロールバーで動かされていたら、そこから実位置を読み直す */
+function syncPos() {
+  const st = grid.scrollTop, sl = grid.scrollLeft;
+  const ky = ratio(totalH(), viewH()), kx = ratio(totalW(), viewW());
+  if (ky === 1) { pos.y = st; } else if (Math.abs(st - pos.st) >= 1) { pos.y = st * ky; }
+  if (kx === 1) { pos.x = sl; } else if (Math.abs(sl - pos.sl) >= 1) { pos.x = sl * kx; }
+  pos.y = clampTo(pos.y, totalH(), viewH());
+  pos.x = clampTo(pos.x, totalW(), viewW());
+  pos.st = st; pos.sl = sl;
+}
+function setPos(y, x) {
+  syncPos();
+  if (y !== undefined) {
+    pos.y = clampTo(y, totalH(), viewH());
+    grid.scrollTop = pos.y / ratio(totalH(), viewH());
+    pos.st = grid.scrollTop;
+  }
+  if (x !== undefined) {
+    pos.x = clampTo(x, totalW(), viewW());
+    grid.scrollLeft = pos.x / ratio(totalW(), viewW());
+    pos.sl = grid.scrollLeft;
+  }
+  render();
 }
 
 function renderMeta() {
@@ -319,9 +366,12 @@ function render() {
 
 function draw() {
   if (!info) { return; }
+  syncPos();
   const st = grid.scrollTop, sl = grid.scrollLeft, h = grid.clientHeight, w = grid.clientWidth;
-  const rA = Math.max(0, Math.floor(st / RH)), rB = Math.min(info.rows, Math.ceil((st + h - HH) / RH) + 1);
-  const cA = Math.max(0, Math.floor(sl / CW)), cB = Math.min(info.cols, Math.ceil((sl + w - RW) / CW) + 1);
+  const ry = pos.y, rx = pos.x;
+  const dy = st - ry, dx = sl - rx;     // 実位置 → 置く位置（縮尺しないときは 0）
+  const rA = Math.max(0, Math.floor(ry / RH)), rB = Math.min(info.rows, Math.ceil((ry + h - HH) / RH) + 1);
+  const cA = Math.max(0, Math.floor(rx / CW)), cB = Math.min(info.cols, Math.ceil((rx + w - RW) / CW) + 1);
   for (let br = Math.floor(rA / BR); br * BR < rB; br++) {
     for (let bc = Math.floor(cA / BC); bc * BC < cB; bc++) { request(br, bc); }
   }
@@ -329,13 +379,13 @@ function draw() {
   const inSel = (r, c) => s && r >= s.r0 && r < s.r1 && c >= s.c0 && c < s.c1;
   let out = "";
   for (let r = rA; r < rB; r++) {
-    const top = HH + r * RH;
+    const top = HH + r * RH + dy;
     for (let c = cA; c < cB; c++) {
       const v = cellOf(r, c);
       const cls = "c" + (v !== undefined && NUM_RE.test(v) ? " num" : "") + (v === undefined ? " wait" : "")
         + (inSel(r, c) ? " sel" : "") + (sel && sel.fr === r && sel.fc === c ? " cur" : "");
       out += '<div class="' + cls + '" data-r="' + r + '" data-c="' + c + '" style="top:' + top
-        + 'px;left:' + (RW + c * CW) + 'px;width:' + CW + 'px" title="' + esc(v ?? "") + '">'
+        + 'px;left:' + (RW + c * CW + dx) + 'px;width:' + CW + 'px" title="' + esc(v ?? "") + '">'
         + (v === undefined ? "…" : esc(v)) + "</div>";
     }
   }
@@ -343,13 +393,13 @@ function draw() {
     const hl = s && c >= s.c0 && c < s.c1;
     const lab = colLabel(c);
     out += '<div class="h col' + (hl ? " hl" : "") + '" data-r="-1" data-c="' + c + '" style="top:' + st
-      + 'px;left:' + (RW + c * CW) + 'px;width:' + CW + 'px" title="' + esc(lab) + '">' + esc(lab) + "</div>";
+      + 'px;left:' + (RW + c * CW + dx) + 'px;width:' + CW + 'px" title="' + esc(lab) + '">' + esc(lab) + "</div>";
   }
   for (let r = rA; r < rB; r++) {       // 行見出し（左に張り付く）
     const hl = s && r >= s.r0 && r < s.r1;
     const lab = rowLabel(r);
     out += '<div class="h row' + (hl ? " hl" : "") + '" data-r="' + r + '" data-c="-1" style="top:'
-      + (HH + r * RH) + 'px;left:' + sl + 'px;width:' + RW + 'px" title="' + esc(lab) + '">' + esc(lab) + "</div>";
+      + (HH + r * RH + dy) + 'px;left:' + sl + 'px;width:' + RW + 'px" title="' + esc(lab) + '">' + esc(lab) + "</div>";
   }
   out += '<div class="h corner" data-r="-1" data-c="-1" title="すべて選択（Ctrl+A）" style="top:' + st
     + 'px;left:' + sl + 'px;width:' + RW + 'px"></div>';
@@ -410,8 +460,9 @@ function invalidate(dropCache) {
 function hit(ev) {
   const rect = grid.getBoundingClientRect();
   const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
-  const r = y < HH ? -1 : Math.floor((y - HH + grid.scrollTop) / RH);
-  const c = x < RW ? -1 : Math.floor((x - RW + grid.scrollLeft) / CW);
+  syncPos();
+  const r = y < HH ? -1 : Math.floor((y - HH + pos.y) / RH);
+  const c = x < RW ? -1 : Math.floor((x - RW + pos.x) / CW);
   return { r: Math.min(r, info.rows - 1), c: Math.min(c, info.cols - 1) };
 }
 layer.addEventListener("mousedown", ev => {
@@ -440,10 +491,10 @@ window.addEventListener("mousemove", ev => {
   const p = hit(ev);
   // 端まで来たらスクロールしながら広げる
   const rect = grid.getBoundingClientRect();
-  if (ev.clientY > rect.bottom - 10) { grid.scrollTop += RH; }
-  if (ev.clientY < rect.top + HH + 4) { grid.scrollTop -= RH; }
-  if (ev.clientX > rect.right - 10) { grid.scrollLeft += CW / 2; }
-  if (ev.clientX < rect.left + RW + 4) { grid.scrollLeft -= CW / 2; }
+  if (ev.clientY > rect.bottom - 10) { setPos(pos.y + RH); }
+  if (ev.clientY < rect.top + HH + 4) { setPos(pos.y - RH); }
+  if (ev.clientX > rect.right - 10) { setPos(undefined, pos.x + CW / 2); }
+  if (ev.clientX < rect.left + RW + 4) { setPos(undefined, pos.x - CW / 2); }
   if (drag !== "col") { sel.fr = Math.max(0, p.r); }
   if (drag !== "row") { sel.fc = Math.max(0, p.c); }
   render();
@@ -451,13 +502,28 @@ window.addEventListener("mousemove", ev => {
 window.addEventListener("mouseup", () => { drag = null; });
 
 function scrollToCell(r, c) {
+  syncPos();
   const top = r * RH, left = c * CW;
-  const h = grid.clientHeight - HH, w = grid.clientWidth - RW;
-  if (top < grid.scrollTop) { grid.scrollTop = top; }
-  else if (top + RH > grid.scrollTop + h) { grid.scrollTop = top + RH - h; }
-  if (left < grid.scrollLeft) { grid.scrollLeft = left; }
-  else if (left + CW > grid.scrollLeft + w) { grid.scrollLeft = left + CW - w; }
+  const h = viewH(), w = viewW();
+  let y, x;
+  if (top < pos.y) { y = top; } else if (top + RH > pos.y + h) { y = top + RH - h; }
+  if (left < pos.x) { x = left; } else if (left + CW > pos.x + w) { x = left + CW - w; }
+  if (y !== undefined || x !== undefined) { setPos(y, x); }
 }
+
+// 縮尺しているときは、ホイールで実位置を動かす（そのままだと 1 目盛りで何十行も飛ぶ）
+grid.addEventListener("wheel", ev => {
+  if (!info || ev.ctrlKey) { return; }
+  const ky = ratio(totalH(), viewH()), kx = ratio(totalW(), viewW());
+  if (ky === 1 && kx === 1) { return; }
+  const unit = ev.deltaMode === 1 ? RH : ev.deltaMode === 2 ? viewH() : 1;
+  let ddy = ev.deltaY * unit, ddx = ev.deltaX * unit;
+  if (ev.shiftKey && !ddx) { ddx = ddy; ddy = 0; }
+  if ((ddy && ky !== 1) || (ddx && kx !== 1)) {
+    ev.preventDefault();
+    setPos(ddy ? pos.y + ddy : undefined, ddx ? pos.x + ddx : undefined);
+  }
+}, { passive: false });
 
 grid.addEventListener("keydown", ev => {
   if (!info || info.rows === 0 || info.cols === 0) { return; }
