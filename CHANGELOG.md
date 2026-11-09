@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-09
+
+### Fixed
+
+- Variable Editor で、約 150 万行（列なら約 35 万列）を超える配列・DataFrame の末尾までスクロールできなかった問題を直しました。ブラウザの要素の長さの上限を超える表では、スクロールバーの位置を縮尺して読み替えます。ホイール・矢印キー・PageUp/PageDown・Ctrl+End は今までどおり 1 行・1 画面ずつ動き、1,000 万行の表でも最後の行まで選べます。
+
 ## [0.1.7] - 2026-11-02
 
 ### Added
