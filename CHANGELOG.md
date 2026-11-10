@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-10
+
 ### Added
 
 - Variable Editor で、列見出しを **Ctrl+クリック**すると離れた列をまとめて選べるようにしました（もう一度 Ctrl+クリックで外す、Ctrl+ドラッグで連続した列をまとめて足す）。行の範囲は選んだ列すべてで共通です。**X–Y** は Excel と同じく**いちばん左の列を X**、残りを Y にして描きます。たとえば time・altitude・speed の 3 列を選ぶと `plt.plot(x[:, 0], x[:, [3, 7]])`（DataFrame は `df.iloc[:, [0, 3, 7]].plot(x=0, ...)`）が実行されます。Plot・Scatter・Hist・Copy・統計も選んだ列だけが対象です（Image は連続した範囲のみ）。
