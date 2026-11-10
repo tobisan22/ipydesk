@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-10
+
+### Changed
+
+- Figure タブを前に出すのは、**その実行で描いた（触った）figure だけ**にしました。以前は実行のたびに全部の figure を番号順に前へ出していたため、1 枚だけ描き直しても番号のいちばん大きい図が前に来ていました。何枚も描いたときは、最後に描いた figure が前に来ます。どの figure も触らない実行（図を使わないスクリプトなど）では、今見ているタブをそのままにします。「Figure を開く」は、これまでどおり全部の figure を前に出します。
+
 ## [0.2.0] - 2026-11-10
 
 ### Added
