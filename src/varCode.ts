@@ -29,8 +29,14 @@ export interface VarInfo {
 /** 3 次元以上の配列の見え方: 行の軸 1 つ・列の軸 1 つ以上（C 順に並べる）・残りは番号で固定 */
 export interface NdView { row: number; cols: number[]; fix: Record<number, number> }
 
-/** 選択範囲。終端は含まない（Python のスライスと同じ） */
-export interface Sel { r0: number; r1: number; c0: number; c1: number }
+/**
+ * 選択範囲。終端は含まない（Python のスライスと同じ）。
+ * cols は離れた列を選んだとき（Ctrl+クリック）の列番号（昇順）。あれば c0 / c1 はその両端
+ */
+export interface Sel { r0: number; r1: number; c0: number; c1: number; cols?: number[] }
+
+/** プロットの描き方。split: 2 列以上を段に分ける（X 軸は共有） */
+export interface PlotOpts { split?: boolean }
 
 export type PlotKind = "line" | "xy" | "scatter" | "hist" | "image";
 
@@ -48,7 +54,7 @@ export function selectionExpr(
     return (a === 0 ? "" : String(a)) + ":" + (b === n ? "" : String(b));
   };
   const r = one(sel.r0, sel.r1, info.rows);
-  const c = one(sel.c0, sel.c1, info.cols);
+  const c = sel.cols ? "[" + sel.cols.join(", ") + "]" : one(sel.c0, sel.c1, info.cols);
   if (info.kind === "ndarray" && info.view && info.shape.length >= 3) {
     // ビュー: 元の配列の添字で書けるなら書く（R[0:100, 0, 0:3]）。書けなければ並べ替えてから
     // 行を切り出し、その分だけ reshape する（R[0:100].reshape(100, -1)[:, 0:5]）
@@ -67,7 +73,7 @@ export function selectionExpr(
     for (let d = j + 1; d < cs.length; d++) { if (lo[d] !== 0 || hi[d] !== cs[d] - 1) { box = false; } }
     const vary: number[] = [];
     for (let d = 0; d < cs.length; d++) { if (hi[d] > lo[d]) { vary.push(d); } }
-    if (box && vary.length <= 1) {
+    if (!sel.cols && box && vary.length <= 1) {
       const idx: string[] = [];
       for (const k of Object.keys(v.fix)) { idx[+k] = String(v.fix[+k]); }
       idx[v.row] = r;
@@ -117,48 +123,79 @@ export function selectionExpr(
  * 図は変数ごとに 1 つ（plt.figure("x")）に描き直す。前の図は Figure タブの履歴に残る
  */
 export function plotCode(
-  kind: PlotKind, expr: string, info: VarInfo, sel: Sel, page: number[]): string | null {
+  kind: PlotKind, expr: string, info: VarInfo, sel: Sel, page: number[], opts?: PlotOpts): string | null {
+  const cols = sel.cols;
   const nr = sel.r1 - sel.r0;
-  const nc = sel.c1 - sel.c0;
+  const nc = cols ? cols.length : sel.c1 - sel.c0;
   const k = info.kind;
   const pandas = k === "dataframe" || k === "series";
   const table2d = k === "dataframe" || (k === "ndarray" && info.shape.length >= 2);
   if (!info.numeric || nr < 1 || nc < 1 || k === "scalar") { return null; }
   const S = (keep2d: boolean, s: Sel = sel) => selectionExpr(expr, info, s, page, keep2d);
   const head = "import matplotlib.pyplot as plt; plt.figure(" + JSON.stringify(expr.trim()) + "); plt.clf(); ";
-  const col = (c: number, c1 = c + 1) => ({ r0: sel.r0, r1: sel.r1, c0: c, c1 });
+  const colAt = (i: number) => cols ? cols[i] : sel.c0 + i;
+  // 選んだ列の from 番目から to 番目の手前まで。連続していればスライスで書ける形にする
+  const part = (from: number, to: number = nc): Sel => {
+    const a = colAt(from), b = colAt(to - 1) + 1;
+    const out: Sel = { r0: sel.r0, r1: sel.r1, c0: a, c1: b };
+    if (cols && b - a !== to - from) { out.cols = cols.slice(from, to); }
+    return out;
+  };
+  // 凡例・軸ラベルに出す名前: ビューは元の配列の式（R[:, 0, 1]）、それ以外は列番号
+  const names = (from: number): string[] => {
+    const out: string[] = [];
+    for (let i = from; i < nc; i++) {
+      const c = colAt(i);
+      out.push(info.view
+        ? selectionExpr(expr, info, { r0: 0, r1: info.rows, c0: c, c1: c + 1 }, page, false) : String(c));
+    }
+    return out;
+  };
+  const legend = (from: number) =>
+    nc - from >= 2 && nc - from <= 20 ? "; plt.legend(" + JSON.stringify(names(from)) + ")" : "";
+  // 段を分ける: 列ごとに 1 段（8 段まで。それより多ければ重ねる）
+  const split = (n: number) => !!(opts && opts.split) && n >= 2 && n <= 8;
+  const axes = (n: number) => "plt.gcf().subplots(" + n + ", 1, sharex=True)";
   switch (kind) {
     case "line": {
       if (nr * nc < 2) { return null; }
-      if (pandas) { return head + S(false) + ".plot(ax=plt.gca())"; }
-      // ビューで 2 列以上: 凡例に元の配列の式（R[:, 0, 1]）を出す
-      let legend = "";
-      if (info.view && nr > 1 && nc > 1 && nc <= 20) {
-        const names: string[] = [];
-        for (let c = sel.c0; c < sel.c1; c++) {
-          names.push(selectionExpr(expr, info, { r0: 0, r1: info.rows, c0: c, c1: c + 1 }, page, false));
-        }
-        legend = "; plt.legend(" + JSON.stringify(names) + ")";
+      const multi = nr > 1 && nc > 1;
+      if (pandas) {
+        return head + S(false) + (multi && split(nc) ? ".plot(subplots=True, ax=" + axes(nc) + ")" : ".plot(ax=plt.gca())");
       }
-      return head + "plt.plot(" + S(false) + ")" + legend;
+      if (multi && split(nc)) {
+        return head + "[(a.plot(y), a.set_ylabel(n)) for a, y, n in zip(" + axes(nc) + ", " + S(true) + ".T, "
+          + JSON.stringify(names(0)) + ")];";
+      }
+      // ビュー・離れた列で 2 列以上: 凡例を出す（どの列の線か分かるように）
+      return head + "plt.plot(" + S(false) + ")" + ((info.view || cols) && multi ? legend(0) : "");
     }
-    case "xy":
+    case "xy": {     // 左端の列が X、残りが Y（Excel と同じ）
       if (!table2d || nc < 2 || nr < 2) { return null; }
-      return head + (k === "dataframe"
-        ? S(true) + ".plot(x=0, ax=plt.gca())"
-        : "plt.plot(" + S(false, col(sel.c0)) + ", " + S(false, col(sel.c0 + 1, sel.c1)) + ")");
+      const ny = nc - 1;
+      if (k === "dataframe") {
+        return head + S(true) + (split(ny) ? ".plot(x=0, subplots=True, ax=" + axes(ny) + ")" : ".plot(x=0, ax=plt.gca())");
+      }
+      const X = S(false, part(0, 1));
+      if (split(ny)) {
+        // 内包表記の中では外の変数を使わない（pdb で停止中は、中から停止フレームの変数が見えない）
+        return head + "[(a.plot(x, y), a.set_ylabel(n)) for a, x, y, n in zip(" + axes(ny) + ", [" + X + "] * " + ny
+          + ", " + S(true, part(1)) + ".T, " + JSON.stringify(names(1)) + ")];";
+      }
+      return head + "plt.plot(" + X + ", " + S(false, part(1)) + ")" + legend(1);
+    }
     case "scatter":
       if (!table2d || nc !== 2 || nr < 2) { return null; }
       return head + (k === "dataframe"
         ? S(true) + ".plot.scatter(x=0, y=1, ax=plt.gca())"
-        : "plt.scatter(" + S(false, col(sel.c0)) + ", " + S(false, col(sel.c0 + 1)) + ")");
+        : "plt.scatter(" + S(false, part(0, 1)) + ", " + S(false, part(1, 2)) + ")");
     case "hist":
       if (nr * nc < 2) { return null; }
       return head + (pandas
         ? S(false) + ".plot.hist(bins=20, alpha=0.7, ax=plt.gca())"
         : "plt.hist(" + S(false) + ", bins=\"auto\")");
     case "image":
-      if (!table2d || nr < 2 || nc < 2) { return null; }
+      if (!table2d || cols || nr < 2 || nc < 2) { return null; }
       return head + "plt.imshow(" + S(true) + (k === "dataframe" ? ".to_numpy(dtype=float)" : "")
         + ", aspect=\"auto\", interpolation=\"nearest\"); plt.colorbar()";
     default:

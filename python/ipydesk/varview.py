@@ -222,6 +222,13 @@ def _span(lo: int, hi: int, n: int, cap: int) -> tuple[int, int]:
     return lo, hi
 
 
+def _cols(cols, ncols: int) -> list[int] | None:
+    """離れた列の選択（Ctrl+クリック）の列番号。範囲外は捨てる。指定が無ければ None"""
+    if not cols:
+        return None
+    return [c for c in (int(x) for x in cols) if 0 <= c < ncols]
+
+
 # ---- xarray.DataArray（入っていれば。import はしない） ----------------------------------
 
 
@@ -312,14 +319,14 @@ class _Nd:
         self.rows = int(b.shape[0])
         self.cols = int(np.prod(self.colshape)) if self.colshape else 1
 
-    def get(self, r0: int, r1: int, c0: int, c1: int):
-        """[r0, r1) × [c0, c1) の 2 次元配列"""
+    def get(self, r0: int, r1: int, c0: int, c1: int, cols: list[int] | None = None):
+        """[r0, r1) × [c0, c1) の 2 次元配列。cols があれば、その列だけ（c0 / c1 は見ない）"""
         import numpy as np
 
         sub = self.b[r0:r1]
         if len(self.colshape) == 1:
-            return sub[:, c0:c1]
-        ci = np.unravel_index(np.arange(c0, c1), self.colshape)
+            return sub[:, c0:c1] if cols is None else sub[:, cols]
+        ci = np.unravel_index(np.arange(c0, c1) if cols is None else np.asarray(cols, dtype=np.intp), self.colshape)
         return sub[(slice(None),) + tuple(ci)]
 
     def item(self, r: int, c: int):
@@ -435,7 +442,7 @@ def _dims(v: Any, inf: dict, page, view) -> tuple[Any, int, int]:
 
 
 def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None,
-                view: dict | None = None):
+                view: dict | None = None, cols: list[int] | None = None):
     """統計に使う値（ndarray）と、数値の列数・全列数。数値が無ければ値は None"""
     import numpy as np
 
@@ -444,10 +451,11 @@ def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | No
     nd, nrows, ncols = _dims(v, inf, page, view)
     r0, r1 = _span(r0, r1, nrows, MAX_STATS_CELLS)
     c0, c1 = _span(c0, c1, ncols, MAX_STATS_CELLS)
-    all_cols = c1 - c0
+    cl = _cols(cols, ncols)
+    all_cols = c1 - c0 if cl is None else len(cl)
     if (r1 - r0) * max(1, all_cols) > MAX_STATS_CELLS:
         raise ValueError(f"統計を計算できるのは {MAX_STATS_CELLS:,} セルまでです")
-    if r1 <= r0 or c1 <= c0:
+    if r1 <= r0 or all_cols <= 0:
         return None, 0, all_cols
 
     def num(a):
@@ -455,10 +463,10 @@ def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | No
         return a if _is_numeric_dtype(a.dtype) else None
 
     if nd is not None:
-        a = num(nd.get(r0, r1, c0, c1))
+        a = num(nd.get(r0, r1, c0, c1, cl))
         return a, (all_cols if a is not None else 0), all_cols
     if kind == "dataframe":
-        sub = v.iloc[r0:r1, c0:c1]
+        sub = v.iloc[r0:r1, c0:c1] if cl is None else v.iloc[r0:r1, cl]
         keep = [j for j, dt in enumerate(sub.dtypes) if isinstance(dt, np.dtype) and _is_numeric_dtype(dt)]
         if not keep:
             return None, 0, all_cols
@@ -487,11 +495,11 @@ def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | No
 
 
 def stats(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None,
-          view: dict | None = None) -> dict:
-    """選択範囲の統計。std は N−1（MATLAB の std と同じ）"""
+          view: dict | None = None, cols: list[int] | None = None) -> dict:
+    """選択範囲の統計。std は N−1（MATLAB の std と同じ）。cols があれば、その列だけ"""
     import numpy as np
 
-    a, num_cols, all_cols = _stats_data(v, r0, r1, c0, c1, page, view)
+    a, num_cols, all_cols = _stats_data(v, r0, r1, c0, c1, page, view, cols)
     out: dict[str, Any] = {"numCols": num_cols, "allCols": all_cols}
     if a is None or a.size == 0:
         out["kind"] = "none"
@@ -578,13 +586,14 @@ def _page_index(page: list[int] | None, dims: list[int] | tuple) -> list[int]:
 
 
 def copy_text(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None,
-              view: dict | None = None) -> str:
-    """範囲をタブ区切り（Excel に貼れる形）で返す。数値は丸めずに出す"""
+              view: dict | None = None, cols: list[int] | None = None) -> str:
+    """範囲をタブ区切り（Excel に貼れる形）で返す。数値は丸めずに出す。cols があれば、その列だけ"""
     inf = info(v)
     nd, nrows, ncols = _dims(v, inf, page, view)
     r0, r1 = _span(r0, r1, nrows, MAX_COPY_CELLS)
     c0, c1 = _span(c0, c1, ncols, MAX_COPY_CELLS)
-    if (r1 - r0) * max(1, c1 - c0) > MAX_COPY_CELLS:
+    cl = _cols(cols, ncols)
+    if (r1 - r0) * max(1, c1 - c0 if cl is None else len(cl)) > MAX_COPY_CELLS:
         raise ValueError(f"コピーできるのは {MAX_COPY_CELLS:,} セルまでです")
     kind = inf["kind"]
 
@@ -597,9 +606,9 @@ def copy_text(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None
     if nrows == 0:
         rows = []
     elif nd is not None:
-        rows = [list(r) for r in nd.get(r0, r1, c0, c1)]
+        rows = [list(r) for r in nd.get(r0, r1, c0, c1, cl)]
     elif kind == "dataframe":
-        rows = v.iloc[r0:r1, c0:c1].to_numpy(dtype=object).tolist()
+        rows = (v.iloc[r0:r1, c0:c1] if cl is None else v.iloc[r0:r1, cl]).to_numpy(dtype=object).tolist()
     elif kind == "series":
         rows = [[x] for x in v.iloc[r0:r1].to_numpy(dtype=object)]
     elif kind == "list":
@@ -674,13 +683,13 @@ def _handle(req: dict, shell=None) -> dict:
         page = req.get("page")
         view = req.get("view")
         if op == "copy":
-            res["text"] = copy_text(v, req["r0"], req["r1"], req["c0"], req["c1"], page, view)
+            res["text"] = copy_text(v, req["r0"], req["r1"], req["c0"], req["c1"], page, view, req.get("cols"))
         elif op == "block":
             res["block"] = block(v, req["r0"], req["r1"], req["c0"], req["c1"], page, req.get("full"), view)
         elif op == "collabels":
             res.update(collabels(v))
         elif op == "stats":
-            res["stats"] = stats(v, req["r0"], req["r1"], req["c0"], req["c1"], page, view)
+            res["stats"] = stats(v, req["r0"], req["r1"], req["c0"], req["c1"], page, view, req.get("cols"))
         elif op == "cell":
             res["cell"] = cell(v, req["r"], req["c"], page, view)
         else:

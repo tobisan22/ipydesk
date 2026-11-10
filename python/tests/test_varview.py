@@ -365,3 +365,20 @@ def test_multiindex_levels():
     assert b["rowLevels"] == [["run0", "run1"], ["1", "0"]]
     flat = varview.block(pd.DataFrame({"a": [1]}), 0, 1, 0, 1)
     assert "colLevels" not in flat and "rowLevels" not in flat
+
+
+def test_scattered_columns_copy_and_stats():
+    """Ctrl+クリックで選んだ離れた列（cols）だけを対象にする"""
+    a = np.arange(40.0).reshape(5, 8)
+    assert varview.copy_text(a, 0, 2, 0, 8, cols=[0, 3, 7]) == "0.0\t3.0\t7.0\n8.0\t11.0\t15.0"
+    s = varview.stats(a, 0, 5, 0, 8, cols=[0, 3, 7])
+    sub = a[:, [0, 3, 7]]
+    assert (s["n"], s["allCols"]) == (15, 3)
+    assert s["mean"] == pytest.approx(sub.mean()) and s["max"] == sub.max()
+    df = pd.DataFrame(a, columns=list("abcdefgh"))
+    assert varview.copy_text(df, 1, 2, 0, 8, cols=[1, 6]) == "9.0\t14.0"
+    assert varview.stats(df, 0, 5, 0, 8, cols=[1, 6])["mean"] == pytest.approx(a[:, [1, 6]].mean())
+    r = np.arange(90.0).reshape(10, 3, 3)
+    view = {"row": 0, "cols": [1, 2], "fix": {}}
+    assert varview.copy_text(r, 1, 2, 0, 9, None, view, cols=[0, 4, 8]) == "9.0\t13.0\t17.0"
+    assert varview.copy_text(a, 0, 1, 0, 8, cols=[2, 99]) == "2.0", "範囲外の列は捨てる"

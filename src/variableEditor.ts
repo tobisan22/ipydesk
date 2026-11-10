@@ -41,6 +41,7 @@ export interface VarLayout {
   view?: NdView & { shape: number[] };  // 3 次元以上: 最後の見え方（形が同じときだけ戻す）
   rh?: number;                          // 全体の行の高さ（18 / 22 / 28）
   zoom?: number;                        // 表示倍率（%）
+  split?: boolean;                      // プロット: 列ごとに段を分ける
   t?: number;                           // 最後に使った日時
 }
 
@@ -254,10 +255,11 @@ export function html(cspSource: string, expr: string, layout: VarLayout = {}, de
   <div class="pages" id="pages"></div>
   <div class="tools">
     <button class="primary" data-plot="line" title="選択範囲を折れ線で描く（列ごとに 1 本）">📈 Plot</button>
-    <button data-plot="xy" title="1 列目を X、残りの列を Y にして描く">X–Y</button>
-    <button data-plot="scatter" title="2 列を選んで、1 列目を X・2 列目を Y にした散布図">Scatter</button>
+    <button data-plot="xy" title="左端の列を X、残りの列を Y にして描く。離れた列は、列見出しを Ctrl+クリックして選ぶ">X–Y</button>
+    <button data-plot="scatter" title="2 列を選んで、左の列を X・右の列を Y にした散布図">Scatter</button>
     <button data-plot="hist" title="選択範囲のヒストグラム">Hist</button>
     <button data-plot="image" title="選択範囲を画像（カラーマップ）として描く">Image</button>
+    <button id="split" title="Plot / X–Y で 2 列以上を描くとき、同じ軸に重ねずに列ごとに段を分ける（X 軸は共有。8 列まで）">Subplots</button>
     <span class="sep"></span>
     <button id="copy" title="選択範囲をタブ区切りでコピー（Ctrl+C）。Excel にそのまま貼れます">Copy</button>
     <button id="insp-btn" title="選んだセルの値を全文で表示する（インスペクタ）">Inspect</button>
@@ -333,6 +335,8 @@ const pending = new Map();       // reqId → { kind, ... }
 const failed = new Map();        // key → gen（同じ世代では問い合わせ直さない）
 let reqSeq = 0;
 let sel = null;                  // { ar, ac, fr, fc }（両端を含む。a = 起点、f = 動かす端）
+let extra = [];                  // 列見出しの Ctrl+クリックで足した、離れた列（sel の列に加えて選ぶ。行は sel と共通）
+let split = !!LAYOUT.split;      // プロット: 列ごとに段を分ける
 let selSeq = 0;                  // 選択が変わるたびに増やす（統計・インスペクタの古い答えを捨てる）
 let drag = null;                 // "cell" | "row" | "col"
 let rz = null;                   // サイズ変更のドラッグ { kind, i, x, y, size }
@@ -556,7 +560,8 @@ function applyInfo(i, force) {
   renderPages();
   if (sel) {   // 形が変わっても選択は範囲内に収める
     const cl = (v, n) => Math.max(0, Math.min(v, n - 1));
-    if (i.rows === 0 || i.cols === 0) { sel = null; }
+    extra = extra.filter(c => c < i.cols);
+    if (i.rows === 0 || i.cols === 0) { sel = null; extra = []; }
     else { sel = { ar: cl(sel.ar, i.rows), ac: cl(sel.ac, i.cols), fr: cl(sel.fr, i.rows), fc: cl(sel.fc, i.cols) }; }
   }
   sizeSpacer();
@@ -617,7 +622,7 @@ function saveLayout() {
       byLabel: saved.byLabel, byIndex: saved.byIndex,
       byView: Object.keys(saved.byView).length ? saved.byView : undefined,
       view: view && raw ? { shape: raw.shape, row: view.row, cols: view.cols, fix: view.fix } : LAYOUT.view,
-      rh: rows.base === 22 ? undefined : rows.base, zoom: Math.round(Z * 100) } });
+      rh: rows.base === 22 ? undefined : rows.base, zoom: Math.round(Z * 100), split: split || undefined } });
   }, 500);
 }
 
@@ -811,7 +816,8 @@ function setRowHeights(list, h) {
 /** 選んだ列すべて（列全体を選んでいて、その中の列なら）。それ以外は c だけ */
 function colTargets(c) {
   const s = norm();
-  if (s && s.r0 === 0 && s.r1 === info.rows && c >= s.c0 && c < s.c1) {
+  if (s && s.r0 === 0 && s.r1 === info.rows && (s.cols ? s.cols.includes(c) : c >= s.c0 && c < s.c1)) {
+    if (s.cols) { return s.cols.slice(0, SizeAxis.MAX); }
     const out = [];
     for (let i = s.c0; i < s.c1 && out.length < SizeAxis.MAX; i++) { out.push(i); }
     return out;
@@ -950,9 +956,19 @@ $("pages").addEventListener("change", e => {
 function norm() {
   if (!info || info.rows === 0 || info.cols === 0) { return null; }
   if (!sel) { return null; }
-  return { r0: Math.min(sel.ar, sel.fr), r1: Math.max(sel.ar, sel.fr) + 1,
-           c0: Math.min(sel.ac, sel.fc), c1: Math.max(sel.ac, sel.fc) + 1 };
+  const s = { r0: Math.min(sel.ar, sel.fr), r1: Math.max(sel.ar, sel.fr) + 1,
+              c0: Math.min(sel.ac, sel.fc), c1: Math.max(sel.ac, sel.fc) + 1 };
+  if (extra.length) {   // 離れた列: 連続していなければ cols（昇順）を付ける。c0 / c1 はその両端
+    const set = new Set(extra);
+    for (let c = s.c0; c < s.c1; c++) { set.add(c); }
+    const list = [...set].sort((a, b) => a - b);
+    s.c0 = list[0]; s.c1 = list[list.length - 1] + 1;
+    if (s.c1 - s.c0 !== list.length) { s.cols = list; }
+  }
+  return s;
 }
+/** 選択の列数（離れた列を選んでいれば、その数） */
+function selCols(t) { return t.cols ? t.cols.length : t.c1 - t.c0; }
 /** プロット・コピーの対象。何も選んでいなければ全体 */
 function target() {
   return norm() || (info ? { r0: 0, r1: info.rows, c0: 0, c1: info.cols } : null);
@@ -1076,7 +1092,9 @@ function draw() {
   const ytop = r => hh + rows.pos(r) * Z + (r < fr ? st : dy);
   const xleft = c => rw + cols.pos(c) * Z + (c < fc ? sl : dx);
   const s = norm();
-  const inSel = (r, c) => s && r >= s.r0 && r < s.r1 && c >= s.c0 && c < s.c1;
+  const cset = s && s.cols ? new Set(s.cols) : null;
+  const inC = c => s && (cset ? cset.has(c) : c >= s.c0 && c < s.c1);
+  const inSel = (r, c) => s && r >= s.r0 && r < s.r1 && inC(c);
   const hr = heatOn && info.numeric ? heatRange(rlist, clist) : null;
   const lh = LH0() * Z;
   let out = "";
@@ -1112,7 +1130,7 @@ function draw() {
         const same = (a, b) => { for (let q = 0; q <= k; q++) { if (colLevel(a, q) !== colLevel(b, q)) { return false; } } return true; };
         while (j + 1 < seg.length && seg[j + 1] === seg[j] + 1 && same(seg[i], seg[j + 1])) { j++; }
         const a = seg[i], b = seg[j], lab = colLevel(a, k);
-        const hl = s && a >= s.c0 && b < s.c1;
+        const hl = inC(a) && inC(b);
         out += '<div class="h col' + (hl ? " hl" : "") + (a < fc ? " fzh" : "") + '" data-r="-1" data-c="' + a + '" data-c2="' + b
           + '" style="top:' + (st + k * h1) + "px;left:" + xleft(a) + "px;width:" + (xleft(b) + cols.size(b) * Z - xleft(a))
           + "px;" + lstyle + (a < fc ? ";z-index:4" : "") + '" title="' + esc(lab) + '">' + esc(lab) + "</div>";
@@ -1122,7 +1140,7 @@ function draw() {
   }
   const cstyle = "height:" + h1 + "px;line-height:" + (h1 - 1) + "px";
   for (const c of clist) {
-    const hl = s && c >= s.c0 && c < s.c1;
+    const hl = inC(c);
     const lab = L > 1 ? colLevel(c, L - 1) : colLabel(c);
     const ctx = esc(JSON.stringify({ webviewSection: "colHeader", col: c, preventDefaultContextMenuItems: true }));
     out += '<div class="h col' + (hl ? " hl" : "") + (fc > 0 && c === fc - 1 ? " fzrb" : "") + '" data-r="-1" data-c="' + c
@@ -1190,7 +1208,7 @@ function selChanged(now) {
 function autoStats(force) {
   const t = norm();
   if (!t || !info || ended) { stat = null; renderFoot(); return; }
-  const n = (t.r1 - t.r0) * (t.c1 - t.c0);
+  const n = (t.r1 - t.r0) * selCols(t);
   if (n <= 1 && !force) { stat = null; renderFoot(); return; }   // 1 セルは値そのもの
   if (n > ST_MAX) { stat = { seq: selSeq, state: "big" }; renderFoot(); return; }
   if (n > ST_AUTO && !force) { stat = { seq: selSeq, state: "link" }; renderFoot(); return; }
@@ -1249,7 +1267,7 @@ function renderFoot() {
   let h = "";
   if (info) {
     const t = norm();
-    h += t ? "<span>選択 " + (t.r1 - t.r0) + "×" + (t.c1 - t.c0) + "  <code>" + esc(selLabel()) + "</code></span>"
+    h += t ? "<span>選択 " + (t.r1 - t.r0) + "×" + selCols(t) + "  <code>" + esc(selLabel()) + "</code></span>"
            : "<span>選択なし（プロット・コピーは全体）</span>";
     const sh = statsHtml();
     if (sh) { h += "<span>" + sh + "</span>"; }
@@ -1267,7 +1285,7 @@ $("foot").addEventListener("click", e => {
 function renderTools() {
   const t = target();
   for (const b of document.querySelectorAll("button[data-plot]")) {
-    const code = info && t && !ended ? plotCode(b.dataset.plot, EXPR, info, t, page) : null;
+    const code = info && t && !ended ? plotCode(b.dataset.plot, EXPR, info, t, page, { split }) : null;
     b.disabled = !code;
     b.dataset.code = code || "";
     b.title = (b.dataset.tip || (b.dataset.tip = b.title)) + (code ? "\\n\\n" + code : "");
@@ -1396,7 +1414,25 @@ layer.addEventListener("mousedown", ev => {
   grid.focus();
   const r = +d.dataset.r, c = +d.dataset.c;
   const last = { r: info.rows - 1, c: info.cols - 1 };
-  if (r < 0 && c < 0) { sel = { ar: 0, ac: 0, fr: last.r, fc: last.c }; drag = null; }
+  // 列見出しの Ctrl+クリック: 離れた列を足す（選んである列なら外す）。行の範囲は今の選択のまま
+  const add = (ev.ctrlKey || ev.metaKey) && !ev.shiftKey && r < 0 && c >= 0 ? norm() : null;
+  if (!add) { extra = []; }
+  if (add) {
+    const c2 = d.dataset.c2 !== undefined ? +d.dataset.c2 : c;
+    const list = add.cols ? add.cols.slice() : [];
+    if (!add.cols) { for (let i = add.c0; i < add.c1; i++) { list.push(i); } }
+    if (c2 === c && list.length > 1 && list.includes(c)) {
+      extra = list.filter(x => x !== c);
+      const k = extra.pop();
+      sel = { ar: sel.ar, ac: k, fr: sel.fr, fc: k };
+      drag = null;
+    } else {
+      extra = list;
+      sel = { ar: sel.ar, ac: c, fr: sel.fr, fc: c2 };
+      drag = c2 === c ? "col" : null;      // Ctrl+ドラッグ: 連続した列をまとめて足す
+    }
+  }
+  else if (r < 0 && c < 0) { sel = { ar: 0, ac: 0, fr: last.r, fc: last.c }; drag = null; }
   else if (r < 0 && d.dataset.c2 !== undefined) {   // MultiIndex の上の段: まとめた列すべて
     sel = { ar: 0, ac: c, fr: last.r, fc: +d.dataset.c2 };
     drag = null;
@@ -1526,11 +1562,12 @@ grid.addEventListener("keydown", ev => {
   }
   if (info.rows === 0 || info.cols === 0) { return; }
   if (ctrl && ev.key.toLowerCase() === "a") {
-    sel = { ar: 0, ac: 0, fr: info.rows - 1, fc: info.cols - 1 }; ev.preventDefault(); selChanged(); render(); return;
+    extra = []; sel = { ar: 0, ac: 0, fr: info.rows - 1, fc: info.cols - 1 }; ev.preventDefault(); selChanged(); render(); return;
   }
   if (ctrl && ev.key.toLowerCase() === "c") { ev.preventDefault(); copy(); return; }
   if (ev.key === " " && (ev.shiftKey || ctrl) && sel) {   // Shift+Space: 行全体、Ctrl+Space: 列全体
     ev.preventDefault();
+    extra = [];
     sel = ev.shiftKey && !ctrl ? { ar: sel.ar, ac: 0, fr: sel.fr, fc: info.cols - 1 }
                                : { ar: 0, ac: sel.ac, fr: info.rows - 1, fc: sel.fc };
     selChanged(); render(); return;
@@ -1545,10 +1582,11 @@ grid.addEventListener("keydown", ev => {
     if (ctrl) { if (mv[0]) { r = mv[0] < 0 ? 0 : info.rows - 1; } if (mv[1]) { c = mv[1] < 0 ? 0 : info.cols - 1; } }
   } else if (ev.key === "Home") { r = ctrl ? 0 : cur.fr; c = 0; }
   else if (ev.key === "End") { r = ctrl ? info.rows - 1 : cur.fr; c = info.cols - 1; }
-  else if (ev.key === "Escape") { sel = null; selChanged(); render(); return; }
+  else if (ev.key === "Escape") { sel = null; extra = []; selChanged(); render(); return; }
   else { return; }
   ev.preventDefault();
   r = Math.max(0, Math.min(r, info.rows - 1)); c = Math.max(0, Math.min(c, info.cols - 1));
+  extra = [];
   sel = ev.shiftKey && sel ? { ...sel, fr: r, fc: c } : { ar: r, ac: c, fr: r, fc: c };
   scrollToCell(r, c);
   selChanged();
@@ -1575,6 +1613,13 @@ $("heat").addEventListener("click", () => {
   render();
 });
 $("heat-scale").addEventListener("change", e => { heatMode = e.target.value; render(); });
+$("split").classList.toggle("on", split);
+$("split").addEventListener("click", () => {
+  split = !split;
+  $("split").classList.toggle("on", split);
+  renderTools();
+  saveLayout();
+});
 for (const b of document.querySelectorAll("button[data-plot]")) {
   b.addEventListener("click", () => {
     if (b.dataset.code) { vscode.postMessage({ type: "plot", code: b.dataset.code }); }

@@ -81,3 +81,58 @@ test("V-6 2 次元以下・ビューの無い配列は今までどおり", () =>
   const P: VarInfo = { ...A, shape: [10, 4, 5], pages: [5] };
   assert.equal(selectionExpr("R", P, { r0: 0, r1: 3, c0: 1, c1: 2 }, [2], false), "R[:3, 1, 2]");
 });
+
+const A2: VarInfo = { kind: "ndarray", cls: "ndarray float64", shape: [10, 8], rows: 10, cols: 8, pages: [],
+                      numeric: true, labels: false };
+const DF: VarInfo = { kind: "dataframe", cls: "DataFrame", shape: [10, 8], rows: 10, cols: 8, pages: [],
+                      numeric: true, labels: true };
+const HEAD = 'import matplotlib.pyplot as plt; plt.figure("R"); plt.clf(); ';
+const far = { r0: 0, r1: 10, c0: 0, c1: 8, cols: [0, 3, 7] };
+
+test("V-7 離れた列: 選択範囲の式", () => {
+  assert.equal(selectionExpr("R", A2, far, [], false), "R[:, [0, 3, 7]]");
+  assert.equal(selectionExpr("R", A2, { ...far, r0: 2, r1: 7 }, [], false), "R[2:7, [0, 3, 7]]");
+  assert.equal(selectionExpr("R", DF, far, [], true), "R.iloc[:, [0, 3, 7]]");
+  const P: VarInfo = { ...A2, shape: [10, 8, 5], pages: [5] };
+  assert.equal(selectionExpr("R", P, far, [2], false), "R[:, [0, 3, 7], 2]");
+  const R = nd([10001, 3, 3], { row: 0, cols: [1, 2], fix: {} });
+  assert.equal(selectionExpr("R", R, { r0: 0, r1: 10001, c0: 0, c1: 5, cols: [0, 4] }, [], false),
+    "R.reshape(10001, -1)[:, [0, 4]]", "ビューは並べ替えた表から取る");
+});
+
+test("V-8 離れた列: X–Y は左端の列が X", () => {
+  assert.equal(plotCode("xy", "R", A2, far, []),
+    HEAD + 'plt.plot(R[:, 0], R[:, [3, 7]]); plt.legend(["3","7"])');
+  assert.equal(plotCode("xy", "R", DF, far, []), HEAD + "R.iloc[:, [0, 3, 7]].plot(x=0, ax=plt.gca())");
+  assert.equal(plotCode("xy", "R", A2, { ...far, cols: [0, 3] }, []), HEAD + "plt.plot(R[:, 0], R[:, 3])");
+  assert.equal(plotCode("xy", "R", A2, { ...far, cols: [2, 5, 6] }, []),
+    HEAD + 'plt.plot(R[:, 2], R[:, 5:7]); plt.legend(["5","6"])', "残りが連続ならスライス");
+  assert.equal(plotCode("xy", "R", A2, { r0: 0, r1: 10, c0: 0, c1: 2 }, []), HEAD + "plt.plot(R[:, 0], R[:, 1])",
+    "連続した 2 列は今までどおり");
+});
+
+test("V-9 離れた列: ほかのプロット", () => {
+  assert.equal(plotCode("line", "R", A2, far, []), HEAD + 'plt.plot(R[:, [0, 3, 7]]); plt.legend(["0","3","7"])');
+  assert.equal(plotCode("line", "R", DF, far, []), HEAD + "R.iloc[:, [0, 3, 7]].plot(ax=plt.gca())");
+  assert.equal(plotCode("scatter", "R", A2, { ...far, cols: [0, 3] }, []), HEAD + "plt.scatter(R[:, 0], R[:, 3])");
+  assert.equal(plotCode("scatter", "R", A2, far, []), null, "散布図は 2 列ちょうど");
+  assert.equal(plotCode("hist", "R", A2, far, []), HEAD + 'plt.hist(R[:, [0, 3, 7]], bins="auto")');
+  assert.equal(plotCode("image", "R", A2, far, []), null, "画像は連続した範囲だけ");
+});
+
+test("V-10 段を分ける（X 軸を共有）", () => {
+  const AX = "plt.gcf().subplots(2, 1, sharex=True)";
+  const o = { split: true };
+  assert.equal(plotCode("xy", "R", A2, far, [], o),
+    HEAD + "[(a.plot(x, y), a.set_ylabel(n)) for a, x, y, n in zip(" + AX + ', [R[:, 0]] * 2, R[:, [3, 7]].T, ["3","7"])];');
+  assert.equal(plotCode("xy", "R", DF, far, [], o),
+    HEAD + "R.iloc[:, [0, 3, 7]].plot(x=0, subplots=True, ax=" + AX + ")");
+  assert.equal(plotCode("line", "R", A2, { r0: 0, r1: 10, c0: 1, c1: 3 }, [], o),
+    HEAD + "[(a.plot(y), a.set_ylabel(n)) for a, y, n in zip(" + AX + ', R[:, 1:3].T, ["1","2"])];');
+  assert.equal(plotCode("line", "R", DF, { r0: 0, r1: 10, c0: 1, c1: 3 }, [], o),
+    HEAD + "R.iloc[:, 1:3].plot(subplots=True, ax=" + AX + ")");
+  assert.equal(plotCode("xy", "R", A2, { ...far, cols: [0, 3] }, [], o), HEAD + "plt.plot(R[:, 0], R[:, 3])",
+    "Y が 1 列なら分けない");
+  assert.ok(plotCode("xy", "R", { ...A2, shape: [10, 12], cols: 12 }, { r0: 0, r1: 10, c0: 0, c1: 12 }, [], o)!
+    .startsWith(HEAD + "plt.plot(R[:, 0], R[:, 1:])"), "9 列以上は重ねる");
+});

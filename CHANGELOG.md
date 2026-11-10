@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Variable Editor で、列見出しを **Ctrl+クリック**すると離れた列をまとめて選べるようにしました（もう一度 Ctrl+クリックで外す、Ctrl+ドラッグで連続した列をまとめて足す）。行の範囲は選んだ列すべてで共通です。**X–Y** は Excel と同じく**いちばん左の列を X**、残りを Y にして描きます。たとえば time・altitude・speed の 3 列を選ぶと `plt.plot(x[:, 0], x[:, [3, 7]])`（DataFrame は `df.iloc[:, [0, 3, 7]].plot(x=0, ...)`）が実行されます。Plot・Scatter・Hist・Copy・統計も選んだ列だけが対象です（Image は連続した範囲のみ）。
+- ツールバーに **Subplots** を追加しました。オンにすると、Plot / X–Y で 2 列以上を描くとき、同じ軸に重ねずに列ごとに段を分けます（X 軸は共有。8 列まで）。高度と速度のように桁の違う列を並べて見られます。オン／オフは変数（式）ごとに覚えます。
+
+### Changed
+
+- ndarray の X–Y で Y が 2 列以上のとき、凡例（列番号）を出すようにしました。
+
 ## [0.2.1] - 2026-11-10
 
 ### Changed
