@@ -11,9 +11,14 @@
  *  - 列幅・行の高さ・行見出しの幅・表示倍率を変えられる。列幅・全体の行の高さ・倍率は
  *    式ごとに workspaceState へ保存する（個別の行の高さは保存しない）
  *  - 選択範囲の統計をフッターに、選んだセルの全文をインスペクタに出す
+ *  - 3 次元以上の配列は次元バーで見え方（行の軸・列の軸・固定の軸）を選ぶ。列の軸が 2 つ以上なら
+ *    C 順に 1 列に並べる。今の見え方は Python の式で出す
+ *  - DataFrame の MultiIndex は見出しを段に分ける。ウィンドウ枠の固定・ヒートマップ
  */
 import * as vscode from "vscode";
-import { plotCode, selectionExpr } from "./varCode";
+import {
+  defaultView, NdView, parseViewIndex, plotCode, selectionExpr, viewExpr, viewIndexText, viewSig,
+} from "./varCode";
 import { SizeAxis } from "./sizeAxis";
 
 export interface VarQuery {
@@ -23,6 +28,7 @@ export interface VarQuery {
   r?: number; c?: number;
   page?: number[];
   full?: number[];
+  view?: NdView;
 }
 
 /** 式ごとに保存する見た目（webview が作り、拡張が workspaceState に置く） */
@@ -31,13 +37,16 @@ export interface VarLayout {
   rw?: number;                          // 手で変えた行見出しの幅（無ければ自動）
   byLabel?: Record<string, number>;     // DataFrame / Series: 列名 → 幅
   byIndex?: Record<string, number>;     // 列番号 → 幅
+  byView?: Record<string, Record<string, number>>;  // 3 次元以上: ビューの署名 → 列番号 → 幅
+  view?: NdView & { shape: number[] };  // 3 次元以上: 最後の見え方（形が同じときだけ戻す）
   rh?: number;                          // 全体の行の高さ（18 / 22 / 28）
   zoom?: number;                        // 表示倍率（%）
   t?: number;                           // 最後に使った日時
 }
 
 /** 右クリックメニューのコマンド（package.json の webview/context） */
-export type VarMenuCmd = "colAutoFit" | "colReset" | "colResetAll" | "rowAutoFit" | "rowReset" | "rowResetAll";
+export type VarMenuCmd = "colAutoFit" | "colReset" | "colResetAll" | "rowAutoFit" | "rowReset" | "rowResetAll"
+  | "freezeCols" | "freezeRows" | "unfreeze" | "copyViewExpr";
 
 export interface VariableEditorHost {
   /** Python へ問い合わせる（ipydesk.varview.handle の答えが返る）。timeoutMs は大きな統計用 */
@@ -91,7 +100,8 @@ export class VariableEditor {
         break;
       case "copy": {
         try {
-          const res = await this.host.query(this.sid, { op: "copy", expr: this.expr, ...m.sel, page: m.page });
+          const res = await this.host.query(this.sid,
+            { op: "copy", expr: this.expr, ...m.sel, page: m.page, view: m.view ?? undefined });
           if (!res?.ok) { throw new Error(res?.error ?? "取得できませんでした"); }
           await vscode.env.clipboard.writeText(res.text);
           vscode.window.setStatusBarMessage(`IPyDesk: ${m.label} をコピーしました`, 2000);
@@ -185,15 +195,35 @@ export function html(cspSource: string, expr: string, layout: VarLayout = {}, de
   .c.wrap, .h.wrap { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box;
            -webkit-box-orient: vertical; padding-top: 2px; }
   .c.num { text-align: right; }
+  .c.fzr { z-index: 1; background: var(--vscode-editor-background); }
+  .c.fzc { z-index: 2; background: var(--vscode-editor-background); }
+  .c.fzb, .h.fzb { border-bottom: 2px solid var(--vscode-focusBorder, #07f); }
+  .c.fzrb, .h.fzrb { border-right: 2px solid var(--vscode-focusBorder, #07f); }
   .c.sel { background: var(--vscode-editor-selectionBackground); }
   .c.cur { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
   .c.wait { color: var(--vscode-descriptionForeground); }
   .h { background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
-       color: var(--vscode-descriptionForeground); z-index: 2; text-align: center; cursor: default; }
+       color: var(--vscode-descriptionForeground); z-index: 3; text-align: center; cursor: default; }
   .h.row { text-align: right; cursor: e-resize; }
+  .h.lv { text-align: left; }
   .h.col { cursor: s-resize; }
   .h.hl { color: var(--vscode-foreground); background: var(--vscode-list-inactiveSelectionBackground); }
-  .h.corner { z-index: 3; cursor: pointer; }
+  .h.rep { color: color-mix(in srgb, var(--vscode-descriptionForeground) 35%, transparent); }
+  .h.corner { z-index: 4; cursor: pointer; }
+  .dimbar { display: none; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 4px 10px; font-size: 12px;
+            color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-panel-border, #8884); }
+  .dimbar.on { display: flex; }
+  .ax { display: inline-flex; gap: 4px; align-items: center; padding: 1px 4px; border-radius: 3px; }
+  .ax.cur { outline: 1px solid var(--vscode-focusBorder); }
+  .ax b { color: var(--vscode-foreground); font-weight: 600; }
+  .ax input, #vedit { padding: 1px 4px; color: var(--vscode-input-foreground); font: inherit;
+           background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, #8886); }
+  .ax input { width: 56px; font-family: var(--vscode-editor-font-family); }
+  #vedit { width: 180px; font-family: var(--vscode-editor-font-family); }
+  .vexpr { font-family: var(--vscode-editor-font-family); color: var(--vscode-foreground); cursor: text;
+           border-bottom: 1px dashed transparent; }
+  .vexpr:hover { border-bottom-color: var(--vscode-descriptionForeground); }
+  .dimbar .err { color: var(--vscode-errorForeground); }
   body[data-rz="col"], body[data-rz="col"] * { cursor: col-resize !important; }
   body[data-rz="row"], body[data-rz="row"] * { cursor: row-resize !important; }
   #guide { position: fixed; z-index: 10; display: none; pointer-events: none;
@@ -231,6 +261,10 @@ export function html(cspSource: string, expr: string, layout: VarLayout = {}, de
     <span class="sep"></span>
     <button id="copy" title="選択範囲をタブ区切りでコピー（Ctrl+C）。Excel にそのまま貼れます">Copy</button>
     <button id="insp-btn" title="選んだセルの値を全文で表示する（インスペクタ）">Inspect</button>
+    <button id="heat" title="値の大きさで背景に色を付ける（ヒートマップ）。基準は表示中の範囲">Heat</button>
+    <select id="heat-scale" title="ヒートマップの基準" style="display:none">
+      <option value="all">基準: 表示中の全体</option><option value="col">基準: 列ごと</option>
+    </select>
     <span class="sep"></span>
     <select id="rh" title="行の高さ">
       <option value="18">行: 詰める</option><option value="22">行: 標準</option><option value="28">行: 広く</option>
@@ -241,6 +275,7 @@ export function html(cspSource: string, expr: string, layout: VarLayout = {}, de
     <button id="reload" title="最新の値を読み直す">⟳</button>
   </div>
 </div>
+<div class="dimbar" id="dimbar"></div>
 <div id="grid" tabindex="0"><div id="spacer"></div><div id="layer"></div>
   <div class="overlay" id="overlay"></div></div>
 <div id="insp"><div id="insp-split" title="ドラッグで高さを変える"></div>
@@ -254,6 +289,11 @@ const LAYOUT = ${js(layout)};
 const DEF_ZOOM = ${js(defaultZoom)};
 ${selectionExpr.toString()}
 ${plotCode.toString()}
+${viewExpr.toString()}
+${defaultView.toString()}
+${viewIndexText.toString()}
+${parseViewIndex.toString()}
+${viewSig.toString()}
 ${SizeAxis.toString()}
 
 const HH0 = 22;                  // 列見出しの高さ（100% のとき）
@@ -274,8 +314,16 @@ const cols = new SizeAxis(96);
 const rows = new SizeAxis(DENS.includes(LAYOUT.rh) ? LAYOUT.rh : 22);
 let RW0 = 56, rwManual = typeof LAYOUT.rw === "number";
 if (rwManual) { RW0 = clampN(LAYOUT.rw, RW_MIN, RW_MAX); }
-const saved = { byLabel: { ...(LAYOUT.byLabel || {}) }, byIndex: { ...(LAYOUT.byIndex || {}) } };
+const saved = { byLabel: { ...(LAYOUT.byLabel || {}) }, byIndex: { ...(LAYOUT.byIndex || {}) },
+                byView: { ...(LAYOUT.byView || {}) } };
 let labels = null;               // 列名（collabels）。無い・多すぎるときは null（列番号で覚える）
+let labelLevels = null;          // 列の MultiIndex の段ごとのラベル（collabels の levels）
+let rwl = [];                    // 行の MultiIndex: 段ごとの行見出しの幅（100%）
+
+// 3 次元以上の配列の見え方。raw は Python の info、info はビューを当てた表の情報
+let raw = null, view = null, legacy = false, curFix = undefined;
+let frozenR = 0, frozenC = 0;    // ウィンドウ枠の固定（行・列の数）
+let heatOn = false, heatMode = "all";
 
 let info = null, scope = "";
 let page = [];
@@ -300,7 +348,10 @@ const vstate = vscode.getState() || {};
 let inspOn = !!vstate.inspOn, inspH = vstate.inspH || 120;
 
 // ---- 寸法（px）。SizeAxis は 100% の値で持ち、表示のときに Z を掛ける ----
-const HH = () => Math.round(HH0 * Z);
+const colLv = () => (info && info.colLevels > 1 ? info.colLevels : 1);
+const rowLv = () => (info && info.rowLevels > 1 ? info.rowLevels : 1);
+const HH = () => Math.round(HH0 * Z) * colLv();
+const qview = () => (view ? { row: view.row, cols: view.cols, fix: view.fix } : undefined);
 const RWp = () => RW0 * Z;
 function totalH() { return info ? rows.total(info.rows) * Z : 0; }
 function totalW() { return info ? cols.total(info.cols) * Z : 0; }
@@ -380,8 +431,9 @@ function request(br, bc) {
   if (c && c.gen === gen && c.sig === sig) { return; }
   if (failed.get(key) === gen) { return; }
   for (const p of pending.values()) { if (p.kind === "block" && p.key === key && p.gen === gen && p.sig === sig) { return; } }
-  send({ op: "block", r0: br * BR, r1: br * BR + BR, c0: bc * BC, c1: bc * BC + BC, page, full },
-       { kind: "block", key, gen, sig });
+  const v = qview();
+  send({ op: "block", r0: br * BR, r1: br * BR + BR, c0: bc * BC, c1: bc * BC + BC, page, full, view: v },
+       { kind: "block", key, gen, sig, view: !!v });
 }
 
 function onResult(reqId, res) {
@@ -400,11 +452,28 @@ function onResult(reqId, res) {
   }
   lastError = "";
   scope = res.scope || "";
+  if (p.view && !res.block.view) {
+    // view を知らない古い Python（0.1.9 以前）: 軸 0 が行・軸 1 が列のページ表示に戻す
+    legacy = true;
+    view = null;
+    setInfo(res.info);
+    renderDimbar();
+    invalidate(true);
+    return;
+  }
   setInfo(res.info);
-  if (info.labels && res.block.rowLabels && !rwManual) {   // 行ラベル（日時など）が切れないよう広げる（狭めはしない）
+  if (res.block.rowLevels && !rwManual) {   // 行の MultiIndex: 段ごとに幅を広げる
+    res.block.rowLevels.forEach((labs, k) => {
+      const w = Math.min(200, Math.ceil(Math.max(0, ...labs.map(x => measure(String(x))))) + 14);
+      rwl[k] = Math.max(rwl[k] || 30, w);
+    });
+    const sum = rwl.reduce((a, b) => a + b, 0);
+    if (sum !== RW0) { RW0 = sum; sizeSpacer(); }
+  } else if (info.labels && res.block.rowLabels && !rwManual) {   // 行ラベル（日時など）が切れないよう広げる（狭めはしない）
     const w = Math.min(240, Math.ceil(Math.max(0, ...res.block.rowLabels.map(x => measure(String(x))))) + 14);
     if (w > RW0) { RW0 = w; sizeSpacer(); }
   }
+  if (!!p.view !== !!view) { render(); return; }   // ビューの有無が変わる前の答え（形が違う）は捨てる
   const entry = { gen: p.gen, sig: p.sig, ...res.block };
   const old = cache.get(p.key);
   if (p.gen === gen || !old) { cache.set(p.key, entry); }   // 古くても空よりはよい（すぐ取り直す）
@@ -416,24 +485,73 @@ function onResult(reqId, res) {
   render();
 }
 
-function setInfo(i) {
-  const shapeChanged = !info || info.rows !== i.rows || info.cols !== i.cols
-    || info.kind !== i.kind || JSON.stringify(info.pages) !== JSON.stringify(i.pages);
-  const kindChanged = !info || info.kind !== i.kind || info.cols !== i.cols;
+/** Python の info を受け取る。3 次元以上の配列はビューを当てた表の情報にする */
+function setInfo(r) {
+  const shapeSame = raw && JSON.stringify(raw.shape) === JSON.stringify(r.shape) && raw.kind === r.kind;
+  raw = r;
+  let fresh = false;
+  if (r.kind === "ndarray" && r.shape.length >= 3 && !legacy) {
+    if (!view || !shapeSame) { view = initialView(r.shape); fixCur(); fresh = true; }
+  } else { view = null; }
+  applyInfo(derive(r), false);
+  if (!shapeSame) { renderDimbar(); }
+  // ビューを決める前に取った値（最初の問い合わせ・形が変わる前）は使えないので取り直す
+  if (fresh) { invalidate(true); }
+}
+/** 開いたときの見え方: 前に開いたときと形が同じならそのビュー、それ以外は既定（defaultView） */
+function initialView(shape) {
+  const s = LAYOUT.view;
+  if (s && JSON.stringify(s.shape) === JSON.stringify(shape)) {
+    const t = parseViewIndex(viewIndexText(shape.length, s), shape);
+    if (typeof t !== "string" && t.row === s.row) { return { row: s.row, cols: s.cols.slice(), fix: { ...s.fix } }; }
+  }
+  return defaultView(shape);
+}
+/** ビューを当てた表の行数・列数（固定の軸に大きさ 0 があれば空の表。Python の _Nd と同じ） */
+function viewDims(r, v) {
+  if (Object.keys(v.fix).some(k => r.shape[+k] === 0)) { return [0, 1]; }
+  let nc = 1;
+  for (const a of v.cols) { nc *= r.shape[a]; }
+  return [r.shape[v.row], nc];
+}
+/** 行見出しの自動の幅（100%）: 行番号・座標・MultiIndex の段 */
+function autoRWBase() {
+  if (!info) { return 48; }
+  if (rowLv() > 1) {
+    if (rwl.length !== rowLv()) { rwl = new Array(rowLv()).fill(40); }
+    return rwl.reduce((a, b) => a + b, 0);
+  }
+  let w = Math.max(48, Math.ceil(measure(String(Math.max(0, info.rows - 1)))) + 16);
+  if (info.labels) { w = Math.max(w, 72); }
+  const co = view && raw && raw.coords && raw.coords[view.row];
+  if (co && co.length) { w = Math.max(w, Math.min(240, Math.ceil(Math.max(...co.map(x => measure(String(x))))) + 14)); }
+  return w;
+}
+function derive(r) {
+  if (!view) { return r; }
+  const [nr, nc] = viewDims(r, view);
+  return { ...r, rows: nr, cols: nc, pages: [], view };
+}
+/** 表の大きさ・種類・ビューの署名が変わったら、寸法を作り直す */
+function applyInfo(i, force) {
+  const sigOf = x => x.kind + "|" + x.cols + "|" + (x.view ? viewSig(x.view) : "");
+  const shapeChanged = force || !info || info.rows !== i.rows || info.cols !== i.cols
+    || info.kind !== i.kind || JSON.stringify(info.pages) !== JSON.stringify(i.pages)
+    || (info.view ? viewSig(info.view) : "") !== (i.view ? viewSig(i.view) : "")
+    || info.rowLevels !== i.rowLevels || info.colLevels !== i.colLevels;
+  const kindChanged = !info || sigOf(info) !== sigOf(i);
   info = i;
   if (!shapeChanged) { renderMeta(); return; }
   readFont();
-  if (!rwManual) {
-    RW0 = Math.max(48, Math.ceil(measure(String(Math.max(0, i.rows - 1)))) + 16);
-    if (i.labels) { RW0 = Math.max(RW0, 72); }
-  }
+  if (!rwManual) { RW0 = autoRWBase(); }
   rows.clear();                  // 個別の行の高さは形が変わったら捨てる（番号がずれるため）
   if (kindChanged) {
     cols.setBase(i.kind === "dataframe" ? 110 : 96);
-    labels = null;
+    labels = null; labelLevels = null;
     applySaved();
     if (i.kind === "dataframe" || i.kind === "series") { send({ op: "collabels" }, { kind: "labels" }); }
   }
+  frozenR = Math.min(frozenR, i.rows); frozenC = Math.min(frozenC, i.cols);
   page = i.pages.map((n, k) => Math.max(0, Math.min(page[k] || 0, n - 1)));
   renderPages();
   if (sel) {   // 形が変わっても選択は範囲内に収める
@@ -453,10 +571,18 @@ function labelIndex() {
   for (const d of dup) { m.delete(d); }
   return m;
 }
+/** 列番号で覚える場所。3 次元以上はビューの署名ごと（"r0|c1" は 0.1.9 までの byIndex と同じ） */
+function idxStore() {
+  if (view && viewSig(view) !== "r0|c1") {
+    const s = viewSig(view);
+    return saved.byView[s] || (saved.byView[s] = {});
+  }
+  return saved.byIndex;
+}
 function applySaved() {
   if (!info) { return; }
   const out = new Map();
-  for (const [k, w] of Object.entries(saved.byIndex)) {
+  for (const [k, w] of Object.entries(idxStore())) {
     const c = +k;
     if (Number.isInteger(c) && c >= 0 && c < info.cols) { out.set(c, clampN(+w, COL_MIN, COL_MAX)); }
   }
@@ -467,6 +593,7 @@ function applySaved() {
 }
 function onLabels(res) {
   labels = res && res.ok && Array.isArray(res.labels) ? res.labels.map(String) : null;
+  labelLevels = res && res.ok && Array.isArray(res.levels) ? res.levels.map(l => l.map(String)) : null;
   keepTopLeft(applySaved);
 }
 /** 列幅を記憶に書く（w が既定なら消す） */
@@ -474,20 +601,195 @@ function rememberCol(c, w) {
   const li = labelIndex();
   const lab = labels && li && li.get(labels[c]) === c ? labels[c] : null;
   const dflt = w === cols.base;
+  const st = idxStore();
   if (lab !== null) {
     if (dflt) { delete saved.byLabel[lab]; } else { saved.byLabel[lab] = w; }
-    delete saved.byIndex[c];
-  } else if (dflt) { delete saved.byIndex[c]; } else { saved.byIndex[c] = w; }
+    delete st[c];
+  } else if (dflt) { delete st[c]; } else { st[c] = w; }
 }
 let saveTimer = 0;
 function saveLayout() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    for (const k of Object.keys(saved.byView)) { if (!Object.keys(saved.byView[k]).length) { delete saved.byView[k]; } }
     vscode.postMessage({ type: "layout", data: {
       kind: info ? info.kind : undefined, rw: rwManual ? RW0 : undefined,
       byLabel: saved.byLabel, byIndex: saved.byIndex,
+      byView: Object.keys(saved.byView).length ? saved.byView : undefined,
+      view: view && raw ? { shape: raw.shape, row: view.row, cols: view.cols, fix: view.fix } : LAYOUT.view,
       rh: rows.base === 22 ? undefined : rows.base, zoom: Math.round(Z * 100) } });
   }, 500);
+}
+
+// ---- 次元バー（3 次元以上の配列の見え方） ----
+function fixCur() {
+  const fk = view ? Object.keys(view.fix).map(Number).sort((a, b) => a - b) : [];
+  if (curFix === undefined || !fk.includes(curFix)) { curFix = fk.length ? fk[0] : undefined; }
+}
+/** ビューを変える。行・列の軸が変わったら表を作り直し、固定の番号だけなら値を取り直す */
+function setView(v) {
+  if (!raw) { return; }
+  const sigChanged = !view || viewSig(view) !== viewSig(v);
+  view = v;
+  fixCur();
+  if (sigChanged) { frozenR = 0; frozenC = 0; }
+  applyInfo(derive(raw), sigChanged);
+  if (sigChanged) { setPos(0, 0); }
+  invalidate(sigChanged);        // 番号だけなら古い値を出したまま取り直す（Alt+↓ を押し続けても追いつく）
+  renderDimbar();
+  saveLayout();
+  selChanged();
+}
+function setRole(k, role) {
+  const v = { row: view.row, cols: view.cols.slice(), fix: { ...view.fix } };
+  const was = v.row === k ? "row" : v.cols.includes(k) ? "col" : "fix";
+  if (role === was) { return; }
+  const sortN = a => a.sort((x, y) => x - y);
+  if (role === "row") {          // 元の行の軸は列になる（行は常に 1 つ）
+    const old = v.row;
+    v.row = k; v.cols = v.cols.filter(a => a !== k); delete v.fix[k];
+    v.cols.push(old); sortN(v.cols);
+  } else if (role === "col") {
+    if (was === "row") {         // 新しい行: 残りの列の先頭、無ければ固定の先頭
+      const others = v.cols;
+      const fk = sortN(Object.keys(v.fix).map(Number));
+      if (others.length) { v.row = others[0]; v.cols = others.slice(1); }
+      else { v.row = fk[0]; delete v.fix[fk[0]]; v.cols = []; }
+    } else { delete v.fix[k]; }
+    v.cols.push(k); sortN(v.cols);
+  } else {
+    if (was === "row") {
+      if (v.cols.length < 2) { return vmsg("列の軸が 1 つ以上必要です"); }
+      v.row = v.cols[0]; v.cols = v.cols.slice(1);
+    } else {
+      if (v.cols.length < 2) { return vmsg("列の軸が 1 つ以上必要です"); }
+      v.cols = v.cols.filter(a => a !== k);
+    }
+    v.fix[k] = 0;
+    curFix = k;
+  }
+  setView(v);
+}
+function stepFix(k, d, abs) {
+  if (!view || view.fix[k] === undefined) { return; }
+  const n = raw.shape[k];
+  let x = abs !== undefined ? abs : view.fix[k] + d;
+  if (abs !== undefined && x < 0) { x += n; }
+  x = clampN(x, 0, Math.max(0, n - 1));
+  curFix = k;
+  if (x === view.fix[k]) { renderDimbar(); return; }
+  setView({ row: view.row, cols: view.cols, fix: { ...view.fix, [k]: x } });
+}
+function swapRowCol() {
+  if (!view) { return; }
+  const c0 = view.cols[0];
+  const cols2 = [view.row, ...view.cols.slice(1)].sort((a, b) => a - b);
+  setView({ row: c0, cols: cols2, fix: { ...view.fix } });
+}
+function vmsg(t) { const e = $("vmsg"); if (e) { e.textContent = t || ""; } }
+function renderDimbar() {
+  const el = $("dimbar");
+  if (!view || !raw) { el.classList.remove("on"); el.innerHTML = ""; return; }
+  el.classList.add("on");
+  const sh = raw.shape, dims = raw.dims || null;
+  const NAMES = { row: "行", col: "列", fix: "固定" };
+  let h = "";
+  for (let k = 0; k < sh.length; k++) {
+    const role = view.row === k ? "row" : view.cols.includes(k) ? "col" : "fix";
+    h += '<span class="ax' + (role === "fix" && curFix === k ? " cur" : "") + '" data-ax="' + k + '">軸' + k
+      + (dims && dims[k] ? " <b>" + esc(dims[k]) + "</b>" : "")
+      + ' <select data-role="' + k + '" title="この軸の役割">'
+      + ["row", "col", "fix"].map(r => '<option value="' + r + '"' + (r === role ? " selected" : "") + ">" + NAMES[r] + "</option>").join("")
+      + "</select>";
+    if (role === "fix") {
+      h += ' <button class="sm" data-step="-1" data-k="' + k + '" title="番号を −1（Alt+↑）">◀</button>'
+        + '<input type="text" data-fix="' + k + '" value="' + view.fix[k] + '" title="番号（負の数は後ろから）。ホイールで ±1">'
+        + '<button class="sm" data-step="1" data-k="' + k + '" title="番号を +1（Alt+↓）">▶</button> /' + sh[k];
+    } else { h += " " + sh[k].toLocaleString(); }
+    h += "</span>";
+  }
+  const ctx = esc(JSON.stringify({ webviewSection: "viewExpr", preventDefaultContextMenuItems: true }));
+  h += '<button id="swap" title="行の軸と（先頭の）列の軸を入れ替える">⇄ 行列入替</button>'
+    + '<span>表示: <span class="vexpr" id="vexpr" data-vscode-context="' + ctx
+    + '" title="クリックで添字（:, 500, : など）を入力。右クリックで式をコピー">' + esc(viewExpr(EXPR, info)) + "</span>"
+    + " → 行 " + info.rows.toLocaleString() + " × 列 " + info.cols.toLocaleString() + "</span>"
+    + '<span class="err" id="vmsg"></span>';
+  el.innerHTML = h;
+}
+function editViewExpr() {
+  const e = $("vexpr");
+  if (!e || !view) { return; }
+  const inp = document.createElement("input");
+  inp.id = "vedit";
+  inp.value = viewIndexText(raw.shape.length, view);
+  inp.title = "整数と : だけ。: が 2 つなら前が行・後ろが列、3 つ以上なら先頭が行・残りを列に展開。Enter で確定、Esc で取り消し";
+  e.replaceWith(inp);
+  inp.focus(); inp.select();
+  let done = false;
+  inp.addEventListener("keydown", ev => {
+    ev.stopPropagation();
+    if (ev.key === "Escape") { done = true; renderDimbar(); grid.focus(); }
+    if (ev.key !== "Enter") { return; }
+    const v = parseViewIndex(inp.value, raw.shape);
+    if (typeof v === "string") { vmsg(v); return; }   // エラー: 表示は変えない
+    done = true;
+    setView(v);
+    grid.focus();
+  });
+  inp.addEventListener("blur", () => { if (!done) { renderDimbar(); } });
+}
+$("dimbar").addEventListener("change", e => {
+  const t = e.target;
+  if (t.dataset.role !== undefined) { setRole(+t.dataset.role, t.value); return; }
+  if (t.dataset.fix !== undefined) {
+    const x = parseInt(t.value, 10);
+    if (Number.isNaN(x)) { renderDimbar(); return; }
+    stepFix(+t.dataset.fix, 0, x);
+  }
+});
+$("dimbar").addEventListener("click", e => {
+  const s = e.target.closest("[data-step]");
+  if (s) { stepFix(+s.dataset.k, +s.dataset.step); return; }
+  if (e.target.closest("#swap")) { swapRowCol(); return; }
+  if (e.target.closest("#vexpr")) { editViewExpr(); return; }
+  const ax = e.target.closest(".ax");
+  if (ax && view && view.fix[+ax.dataset.ax] !== undefined && curFix !== +ax.dataset.ax) { curFix = +ax.dataset.ax; renderDimbar(); }
+});
+$("dimbar").addEventListener("wheel", e => {
+  const t = e.target;
+  if (!t.dataset || t.dataset.fix === undefined) { return; }
+  e.preventDefault();
+  stepFix(+t.dataset.fix, e.deltaY > 0 ? 1 : -1);
+}, { passive: false });
+$("dimbar").addEventListener("keydown", e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.fix !== undefined && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    e.preventDefault();
+    stepFix(+t.dataset.fix, e.key === "ArrowUp" ? 1 : -1);
+  }
+});
+
+// ---- 見出しのラベル（ビュー・座標・MultiIndex） ----
+function unravel(c, cs) {
+  const out = new Array(cs.length);
+  for (let d = cs.length - 1; d >= 0; d--) { out[d] = c % cs[d]; c = Math.floor(c / cs[d]); }
+  return out;
+}
+function coordsOf(ax) { return raw && raw.coords ? raw.coords[ax] : undefined; }
+/** 列の MultiIndex の段 k のラベル */
+function colLevel(c, k) {
+  if (labelLevels && labelLevels[k] && labelLevels[k][c] !== undefined) { return labelLevels[k][c]; }
+  for (const e of cache.values()) {
+    if (c >= e.c0 && c < e.c1 && e.colLevels) { return e.colLevels[k][c - e.c0]; }
+  }
+  return "";
+}
+/** 行の MultiIndex の段 k のラベル（読み込んでいなければ undefined） */
+function rowLevel(r, k) {
+  for (const e of cache.values()) {
+    if (r >= e.r0 && r < e.r1 && e.rowLevels) { return e.rowLevels[k][r - e.r0]; }
+  }
+  return undefined;
 }
 
 // ---- サイズの変更 ----
@@ -589,10 +891,17 @@ function visibleRowsOf(list) {
 }
 function autoRW() {
   rwManual = false;
-  RW0 = Math.max(48, Math.ceil(measure(String(Math.max(0, info.rows - 1)))) + 16);
-  if (info.labels) { RW0 = Math.max(RW0, 72); }
+  if (rowLv() > 1) { rwl = []; }
+  RW0 = autoRWBase();
   for (const e of cache.values()) {
-    if (e.rowLabels) { RW0 = Math.max(RW0, Math.min(240, Math.ceil(Math.max(0, ...e.rowLabels.map(x => measure(String(x))))) + 14)); }
+    if (rowLv() > 1 && e.rowLevels) {
+      e.rowLevels.forEach((labs, k) => {
+        rwl[k] = Math.max(rwl[k] || 30, Math.min(200, Math.ceil(Math.max(0, ...labs.map(x => measure(String(x))))) + 14));
+      });
+      RW0 = rwl.reduce((a, b) => a + b, 0);
+    } else if (e.rowLabels) {
+      RW0 = Math.max(RW0, Math.min(240, Math.ceil(Math.max(0, ...e.rowLabels.map(x => measure(String(x))))) + 14));
+    }
   }
   sizeSpacer(); render(); saveLayout();
 }
@@ -656,6 +965,7 @@ function cellOf(r, c) {
   return row ? row[c - e.c0] : undefined;
 }
 function rowLabel(r) {
+  if (view) { const co = coordsOf(view.row); return co && co[r] !== undefined ? co[r] : String(r); }
   if (!info.labels) { return String(r); }
   for (const e of cache.values()) {
     if (r >= e.r0 && r < e.r1 && e.rowLabels) { return e.rowLabels[r - e.r0]; }
@@ -663,12 +973,79 @@ function rowLabel(r) {
   return "";
 }
 function colLabel(c) {
+  if (view) {      // 展開した列は [j,k]（座標があれば x/vx のように座標の値）
+    const cs = view.cols.map(a => raw.shape[a]);
+    if (cs.length === 1) { const co = coordsOf(view.cols[0]); return co && co[c] !== undefined ? co[c] : String(c); }
+    const ix = unravel(c, cs);
+    if (view.cols.every(a => coordsOf(a))) { return ix.map((i, d) => coordsOf(view.cols[d])[i]).join("/"); }
+    return "[" + ix.join(",") + "]";
+  }
   if (!info.labels) { return String(c); }
   if (labels && labels[c] !== undefined) { return labels[c]; }
   for (const e of cache.values()) {
     if (c >= e.c0 && c < e.c1 && e.colLabels) { return e.colLabels[c - e.c0]; }
   }
   return "";
+}
+/** 列見出しのツールチップ: ビューなら元の配列でのその列の式 */
+function colTip(c, lab) {
+  if (!view) { return lab; }
+  return lab + "\\n" + selectionExpr(EXPR, info, { r0: 0, r1: info.rows, c0: c, c1: c + 1 }, [], false);
+}
+
+// ---- ヒートマップ ----
+function numOf(v) {
+  if (v === undefined || !NUM_RE.test(v) || /j$/.test(v)) { return NaN; }
+  return parseFloat(v);   // Inf / NaN は NaN になり、色を付けない
+}
+/** 表示中のセルの最小・最大（全体と列ごと） */
+function heatRange(rlist, clist) {
+  const all = { min: Infinity, max: -Infinity }, col = new Map();
+  for (const c of clist) {
+    const s = { min: Infinity, max: -Infinity };
+    for (const r of rlist) {
+      const x = numOf(cellOf(r, c));
+      if (!Number.isFinite(x)) { continue; }
+      if (x < s.min) { s.min = x; } if (x > s.max) { s.max = x; }
+    }
+    col.set(c, s);
+    if (s.min < all.min) { all.min = s.min; } if (s.max > all.max) { all.max = s.max; }
+  }
+  return { all, col };
+}
+/** 0 をまたぐなら 0 を中心にした発散型（負: 青、正: 赤）、またがないなら順序型 */
+function heatColor(hr, c, v) {
+  const x = numOf(v);
+  const s = heatMode === "col" ? hr.col.get(c) : hr.all;
+  if (!Number.isFinite(x) || !s || !(s.max >= s.min)) { return ""; }
+  if (s.min < 0 && s.max > 0) {
+    const m = Math.max(-s.min, s.max), t = x / m;
+    return (t < 0 ? "rgba(59,130,246," : "rgba(239,68,68,") + (Math.abs(t) * 0.6).toFixed(3) + ")";
+  }
+  const span = s.max - s.min, t = span > 0 ? (x - s.min) / span : 0.5;
+  const neg = s.max <= 0;          // 全部 0 以下なら青、それ以外は赤
+  const a = 0.06 + 0.54 * (neg ? 1 - t : t);
+  return (neg ? "rgba(59,130,246," : "rgba(239,68,68,") + a.toFixed(3) + ")";
+}
+
+// ---- ウィンドウ枠の固定 ----
+function frozen() {
+  const fr = info ? Math.min(frozenR, info.rows) : 0, fc = info ? Math.min(frozenC, info.cols) : 0;
+  return { fr, fc, FH: rows.pos(fr) * Z, FW: cols.pos(fc) * Z };
+}
+function freezeAt(kind, n) {
+  if (!info) { return; }
+  if (kind === "col") {
+    const fw = cols.pos(Math.min(n, info.cols)) * Z;
+    if (n > 0 && fw > (grid.clientWidth - RWp()) * 0.8) { lastError = "固定する列が画面に収まりません"; renderFoot(); return; }
+    frozenC = n;
+  } else {
+    const fh = rows.pos(Math.min(n, info.rows)) * Z;
+    if (n > 0 && fh > (grid.clientHeight - HH()) * 0.8) { lastError = "固定する行が画面に収まりません"; renderFoot(); return; }
+    frozenR = n;
+  }
+  lastError = "";
+  render();
 }
 
 let raf = 0;
@@ -685,56 +1062,110 @@ function draw() {
   const ry = pos.y, rx = pos.x;
   const dy = st - ry, dx = sl - rx;     // 実位置 → 置く位置（縮尺しないときは 0）
   const nr = info.rows, nc = info.cols;
-  const rA = nr ? rows.at(ry / Z, nr) : 0, rB = nr ? Math.min(nr, rows.at((ry + h - hh) / Z, nr) + 1) : 0;
-  const cA = nc ? cols.at(rx / Z, nc) : 0, cB = nc ? Math.min(nc, cols.at((rx + w - rw) / Z, nc) + 1) : 0;
-  for (let br = Math.floor(rA / BR); br * BR < rB; br++) {
-    for (let bc = Math.floor(cA / BC); bc * BC < cB; bc++) { request(br, bc); }
-  }
+  const { fr, fc, FH, FW } = frozen();
+  // 固定した行・列はいつも出し、残りはその後ろからスクロール位置に合わせて出す
+  const rA = nr ? Math.max(fr, rows.at((ry + FH) / Z, nr)) : 0, rB = nr ? Math.min(nr, rows.at((ry + h - hh) / Z, nr) + 1) : 0;
+  const cA = nc ? Math.max(fc, cols.at((rx + FW) / Z, nc)) : 0, cB = nc ? Math.min(nc, cols.at((rx + w - rw) / Z, nc) + 1) : 0;
+  const rlist = [], clist = [];
+  for (let r = 0; r < fr; r++) { rlist.push(r); }
+  for (let r = rA; r < rB; r++) { rlist.push(r); }
+  for (let c = 0; c < fc; c++) { clist.push(c); }
+  for (let c = cA; c < cB; c++) { clist.push(c); }
+  const brs = new Set(rlist.map(r => Math.floor(r / BR))), bcs = new Set(clist.map(c => Math.floor(c / BC)));
+  for (const br of brs) { for (const bc of bcs) { request(br, bc); } }
+  const ytop = r => hh + rows.pos(r) * Z + (r < fr ? st : dy);
+  const xleft = c => rw + cols.pos(c) * Z + (c < fc ? sl : dx);
   const s = norm();
   const inSel = (r, c) => s && r >= s.r0 && r < s.r1 && c >= s.c0 && c < s.c1;
+  const hr = heatOn && info.numeric ? heatRange(rlist, clist) : null;
   const lh = LH0() * Z;
   let out = "";
   const rowGeo = [];
-  for (let r = rA; r < rB; r++) {
-    const top = hh + rows.pos(r) * Z + dy, ht = rows.size(r) * Z;
+  for (const r of rlist) {
+    const top = ytop(r), ht = rows.size(r) * Z;
     const wrap = rows.size(r) > rows.base;
     const vstyle = wrap ? "height:" + ht + "px;line-height:" + lh + "px;-webkit-line-clamp:"
       + Math.max(1, Math.floor((ht - 4) / lh)) : "height:" + ht + "px;line-height:" + (ht - 1) + "px";
-    rowGeo.push([r, top, vstyle, wrap]);
-    for (let c = cA; c < cB; c++) {
+    const rb = fr > 0 && r === fr - 1 ? " fzb" : "";
+    rowGeo.push([r, top, vstyle, wrap, rb]);
+    for (const c of clist) {
       const v = cellOf(r, c);
+      const on = inSel(r, c);
+      const bg = hr && !on ? heatColor(hr, c, v) : "";
       const cls = "c" + (wrap ? " wrap" : "") + (v !== undefined && NUM_RE.test(v) ? " num" : "")
-        + (v === undefined ? " wait" : "")
-        + (inSel(r, c) ? " sel" : "") + (sel && sel.fr === r && sel.fc === c ? " cur" : "");
+        + (v === undefined ? " wait" : "") + (c < fc ? " fzc" : r < fr ? " fzr" : "") + rb
+        + (fc > 0 && c === fc - 1 ? " fzrb" : "")
+        + (on ? " sel" : "") + (sel && sel.fr === r && sel.fc === c ? " cur" : "");
       out += '<div class="' + cls + '" data-r="' + r + '" data-c="' + c + '" style="top:' + top
-        + 'px;left:' + (rw + cols.pos(c) * Z + dx) + 'px;width:' + (cols.size(c) * Z) + 'px;' + vstyle
-        + '" title="' + esc(v ?? "") + '">' + (v === undefined ? "…" : esc(v)) + "</div>";
+        + 'px;left:' + xleft(c) + 'px;width:' + (cols.size(c) * Z) + 'px;' + vstyle
+        + (bg ? ";background:" + bg : "") + '" title="' + esc(v ?? "") + '">' + (v === undefined ? "…" : esc(v)) + "</div>";
     }
   }
-  const hstyle = "height:" + hh + "px;line-height:" + (hh - 1) + "px";
-  for (let c = cA; c < cB; c++) {       // 列見出し（上に張り付く）
-    const hl = s && c >= s.c0 && c < s.c1;
-    const lab = colLabel(c);
-    const ctx = esc(JSON.stringify({ webviewSection: "colHeader", col: c, preventDefaultContextMenuItems: true }));
-    out += '<div class="h col' + (hl ? " hl" : "") + '" data-r="-1" data-c="' + c + '" data-vscode-context="' + ctx
-      + '" style="top:' + st + 'px;left:' + (rw + cols.pos(c) * Z + dx) + 'px;width:' + (cols.size(c) * Z) + 'px;'
-      + hstyle + '" title="' + esc(lab) + '">' + esc(lab) + "</div>";
+  // 列見出し（上に張り付く）。MultiIndex は段ごとに出し、上の段は隣り合う同じラベルをまとめる
+  const L = colLv(), h1 = hh / L;
+  const lstyle = "height:" + h1 + "px;line-height:" + (h1 - 1) + "px";
+  for (let k = 0; k < L - 1; k++) {
+    for (const seg of [clist.filter(c => c < fc), clist.filter(c => c >= fc)]) {
+      let i = 0;
+      while (i < seg.length) {
+        let j = i;
+        const same = (a, b) => { for (let q = 0; q <= k; q++) { if (colLevel(a, q) !== colLevel(b, q)) { return false; } } return true; };
+        while (j + 1 < seg.length && seg[j + 1] === seg[j] + 1 && same(seg[i], seg[j + 1])) { j++; }
+        const a = seg[i], b = seg[j], lab = colLevel(a, k);
+        const hl = s && a >= s.c0 && b < s.c1;
+        out += '<div class="h col' + (hl ? " hl" : "") + (a < fc ? " fzh" : "") + '" data-r="-1" data-c="' + a + '" data-c2="' + b
+          + '" style="top:' + (st + k * h1) + "px;left:" + xleft(a) + "px;width:" + (xleft(b) + cols.size(b) * Z - xleft(a))
+          + "px;" + lstyle + (a < fc ? ";z-index:4" : "") + '" title="' + esc(lab) + '">' + esc(lab) + "</div>";
+        i = j + 1;
+      }
+    }
   }
-  for (const [r, top, vstyle, wrap] of rowGeo) {   // 行見出し（左に張り付く）
+  const cstyle = "height:" + h1 + "px;line-height:" + (h1 - 1) + "px";
+  for (const c of clist) {
+    const hl = s && c >= s.c0 && c < s.c1;
+    const lab = L > 1 ? colLevel(c, L - 1) : colLabel(c);
+    const ctx = esc(JSON.stringify({ webviewSection: "colHeader", col: c, preventDefaultContextMenuItems: true }));
+    out += '<div class="h col' + (hl ? " hl" : "") + (fc > 0 && c === fc - 1 ? " fzrb" : "") + '" data-r="-1" data-c="' + c
+      + '" data-vscode-context="' + ctx + '" style="top:' + (st + (L - 1) * h1) + "px;left:" + xleft(c) + "px;width:"
+      + (cols.size(c) * Z) + "px;" + cstyle + (c < fc ? ";z-index:4" : "") + '" title="'
+      + esc(colTip(c, L > 1 ? colLabel(c) : lab)) + '">' + esc(lab) + "</div>";
+  }
+  // 行見出し（左に張り付く）。MultiIndex は段ごとの列に分け、上の行と同じラベルは薄く出す
+  const K = rowLv();
+  const rsum = K > 1 ? rwl.reduce((a, b) => a + b, 0) || 1 : 1;
+  for (const [r, top, vstyle, wrap, rb] of rowGeo) {
     const hl = s && r >= s.r0 && r < s.r1;
-    const lab = rowLabel(r);
     const ctx = esc(JSON.stringify({ webviewSection: "rowHeader", row: r, preventDefaultContextMenuItems: true }));
-    out += '<div class="h row' + (wrap ? " wrap" : "") + (hl ? " hl" : "") + '" data-r="' + r + '" data-c="-1" data-vscode-context="'
-      + ctx + '" style="top:' + top + 'px;left:' + sl + 'px;width:' + rw + 'px;' + vstyle + '" title="' + esc(lab) + '">'
+    const zs = r < fr ? ";z-index:4" : "";
+    if (K > 1) {
+      let x = sl, rep = r > 0;
+      for (let k = 0; k < K; k++) {
+        const wk = (rwl[k] || 30) * (rw / Z) / rsum * Z;
+        const lab = rowLevel(r, k) ?? "";
+        rep = rep && rowLevel(r - 1, k) === lab;
+        out += '<div class="h row lv' + (rep ? " rep" : "") + (wrap ? " wrap" : "") + (hl ? " hl" : "") + rb + '" data-r="' + r
+          + '" data-c="-1" data-vscode-context="' + ctx + '" style="top:' + top + "px;left:" + x + "px;width:" + wk + "px;"
+          + vstyle + zs + '" title="' + esc(lab) + '">' + esc(lab) + "</div>";
+        x += wk;
+      }
+      continue;
+    }
+    const lab = rowLabel(r);
+    out += '<div class="h row' + (wrap ? " wrap" : "") + (hl ? " hl" : "") + rb + '" data-r="' + r + '" data-c="-1" data-vscode-context="'
+      + ctx + '" style="top:' + top + 'px;left:' + sl + 'px;width:' + rw + 'px;' + vstyle + zs + '" title="' + esc(lab) + '">'
       + esc(lab) + "</div>";
   }
+  const hstyle = "height:" + hh + "px;line-height:" + (hh - 1) + "px";
   out += '<div class="h corner" data-r="-1" data-c="-1" title="すべて選択（Ctrl+A）" style="top:' + st
-    + 'px;left:' + sl + 'px;width:' + rw + 'px;' + hstyle + '"></div>';
+    + 'px;left:' + sl + 'px;width:' + rw + 'px;' + hstyle + ';z-index:5"></div>';
   layer.innerHTML = out;
   // 見えていない古い範囲は捨てる（メモリを使い続けないように）
   if (cache.size > 120) {
     for (const [k, e] of cache) {
-      if (e.r1 < rA - 2 * BR || e.r0 > rB + 2 * BR || e.c1 < cA - 2 * BC || e.c0 > cB + 2 * BC) { cache.delete(k); }
+      const keepR = e.r0 < fr, keepC = e.c0 < fc;   // 固定した行・列のブロックは残す
+      if ((!keepR && (e.r1 < rA - 2 * BR || e.r0 > rB + 2 * BR)) || (!keepC && (e.c1 < cA - 2 * BC || e.c0 > cB + 2 * BC))) {
+        cache.delete(k);
+      }
     }
   }
   renderFoot();
@@ -764,7 +1195,7 @@ function autoStats(force) {
   if (n > ST_MAX) { stat = { seq: selSeq, state: "big" }; renderFoot(); return; }
   if (n > ST_AUTO && !force) { stat = { seq: selSeq, state: "link" }; renderFoot(); return; }
   stat = { seq: selSeq, state: "wait" };
-  send({ op: "stats", ...t, page }, { kind: "stats", seq: selSeq }, n > ST_AUTO);
+  send({ op: "stats", ...t, page, view: qview() }, { kind: "stats", seq: selSeq }, n > ST_AUTO);
   renderFoot();
 }
 function onStats(p, res) {
@@ -872,7 +1303,7 @@ function inspect() {
     const r = sel.fr, c = sel.fc;
     const ex = selectionExpr(EXPR, info, { r0: r, r1: r + 1, c0: c, c1: c + 1 }, page, false);
     $("insp-head").innerHTML = "<code>" + esc(ex) + "</code>  読み込み中…";
-    send({ op: "cell", r, c, page }, { kind: "cell", seq: ++inspSeq, ex });
+    send({ op: "cell", r, c, page, view: qview() }, { kind: "cell", seq: ++inspSeq, ex });
   }, 120);
 }
 function onCell(p, res) {
@@ -900,8 +1331,11 @@ function hit(ev) {
   const rect = grid.getBoundingClientRect();
   const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
   syncPos();
-  const r = y < HH() ? -1 : rows.at((y - HH() + pos.y) / Z, info.rows);
-  const c = x < RWp() ? -1 : cols.at((x - RWp() + pos.x) / Z, info.cols);
+  const { FH, FW } = frozen();
+  const hh = HH(), rw = RWp();
+  // 固定した行・列の上はスクロール位置を足さない
+  const r = y < hh ? -1 : rows.at((y - hh + (y - hh < FH ? 0 : pos.y)) / Z, info.rows);
+  const c = x < rw ? -1 : cols.at((x - rw + (x - rw < FW ? 0 : pos.x)) / Z, info.cols);
   return { r: Math.min(r, info.rows - 1), c: Math.min(c, info.cols - 1) };
 }
 /** 見出しの端（サイズを変えられる場所）なら { kind, i } */
@@ -913,14 +1347,16 @@ function edgeAt(ev) {
   if (x < 0 || y < 0 || x > grid.clientWidth || y > grid.clientHeight) { return null; }
   if (x < rw && rw - x <= 4) { return { kind: "rw" }; }
   syncPos();
-  if (y < hh && x >= rw && info.cols > 0) {
-    const px = (x - rw + pos.x) / Z, c = cols.at(px, info.cols);
+  const { FH, FW } = frozen();
+  // 列の境目は見出しの一番下の段だけ（MultiIndex の上の段はまとめた見出しなので境目ではない）
+  if (y < hh && y >= hh - hh / colLv() && x >= rw && info.cols > 0) {
+    const px = (x - rw + (x - rw < FW ? 0 : pos.x)) / Z, c = cols.at(px, info.cols);
     const left = cols.pos(c), right = left + cols.size(c);
     if ((right - px) * Z <= 4 && px < right + 4 / Z) { return { kind: "col", i: c }; }
     if ((px - left) * Z <= 4 && c > 0) { return { kind: "col", i: c - 1 }; }
   }
   if (x < rw && y >= hh && info.rows > 0) {
-    const py = (y - hh + pos.y) / Z, r = rows.at(py, info.rows);
+    const py = (y - hh + (y - hh < FH ? 0 : pos.y)) / Z, r = rows.at(py, info.rows);
     const top = rows.pos(r), bottom = top + rows.size(r);
     if ((bottom - py) * Z <= 3 && py < bottom + 3 / Z) { return { kind: "row", i: r }; }
     if ((py - top) * Z <= 3 && r > 0) { return { kind: "row", i: r - 1 }; }
@@ -961,6 +1397,10 @@ layer.addEventListener("mousedown", ev => {
   const r = +d.dataset.r, c = +d.dataset.c;
   const last = { r: info.rows - 1, c: info.cols - 1 };
   if (r < 0 && c < 0) { sel = { ar: 0, ac: 0, fr: last.r, fc: last.c }; drag = null; }
+  else if (r < 0 && d.dataset.c2 !== undefined) {   // MultiIndex の上の段: まとめた列すべて
+    sel = { ar: 0, ac: c, fr: last.r, fc: +d.dataset.c2 };
+    drag = null;
+  }
   else if (r < 0) {
     sel = ev.shiftKey && sel ? { ar: 0, ac: sel.ac, fr: last.r, fc: c } : { ar: 0, ac: c, fr: last.r, fc: c };
     drag = "col";
@@ -999,9 +1439,10 @@ window.addEventListener("mousemove", ev => {
   // 端まで来たらスクロールしながら広げる
   const rect = grid.getBoundingClientRect();
   if (ev.clientY > rect.bottom - 10) { setPos(pos.y + rows.base * Z); }
-  if (ev.clientY < rect.top + HH() + 4) { setPos(pos.y - rows.base * Z); }
+  const fz = frozen();
+  if (ev.clientY < rect.top + HH() + fz.FH + 4) { setPos(pos.y - rows.base * Z); }
   if (ev.clientX > rect.right - 10) { setPos(undefined, pos.x + 48); }
-  if (ev.clientX < rect.left + RWp() + 4) { setPos(undefined, pos.x - 48); }
+  if (ev.clientX < rect.left + RWp() + fz.FW + 4) { setPos(undefined, pos.x - 48); }
   if (drag !== "col") { sel.fr = Math.max(0, p.r); }
   if (drag !== "row") { sel.fc = Math.max(0, p.c); }
   selSeq++; stat = null;
@@ -1028,11 +1469,17 @@ window.addEventListener("mouseup", ev => {
 
 function scrollToCell(r, c) {
   syncPos();
+  const { fr, fc, FH, FW } = frozen();
   const top = rows.pos(r) * Z, left = cols.pos(c) * Z, rh = rows.size(r) * Z, cw = cols.size(c) * Z;
   const h = viewH(), w = viewW();
   let y, x;
-  if (top < pos.y) { y = top; } else if (top + rh > pos.y + h) { y = Math.min(top, top + rh - h); }
-  if (left < pos.x) { x = left; } else if (left + cw > pos.x + w) { x = Math.min(left, left + cw - w); }
+  // 固定した行・列はいつも見えている。それ以外は固定した分を除いた場所に収める
+  if (r >= fr) {
+    if (top < pos.y + FH) { y = top - FH; } else if (top + rh > pos.y + h) { y = Math.min(top - FH, top + rh - h); }
+  }
+  if (c >= fc) {
+    if (left < pos.x + FW) { x = left - FW; } else if (left + cw > pos.x + w) { x = Math.min(left - FW, left + cw - w); }
+  }
   if (y !== undefined || x !== undefined) { setPos(y, x); }
 }
 
@@ -1061,6 +1508,20 @@ grid.addEventListener("keydown", ev => {
   if (ctrl && !ev.altKey && (ev.key === "=" || ev.key === "+" || ev.key === ";" || ev.key === "-" || ev.key === "0")) {
     ev.preventDefault(); ev.stopPropagation();
     setZoom(ev.key === "0" ? 1 : Z + (ev.key === "-" ? -0.1 : 0.1));
+    return;
+  }
+  if (ev.altKey && !ctrl && view && ev.key.startsWith("Arrow")) {
+    // Alt+↑↓: 選んでいる固定の軸の番号を ±1、Alt+←→: 固定の軸を切り替える
+    ev.preventDefault(); ev.stopPropagation();
+    const fk = Object.keys(view.fix).map(Number).sort((a, b) => a - b);
+    if (!fk.length) { return; }
+    fixCur();
+    if (ev.key === "ArrowUp" || ev.key === "ArrowDown") { stepFix(curFix, ev.key === "ArrowDown" ? 1 : -1); }
+    else {
+      const i = fk.indexOf(curFix), d = ev.key === "ArrowRight" ? 1 : -1;
+      curFix = fk[(i + d + fk.length) % fk.length];
+      renderDimbar();
+    }
     return;
   }
   if (info.rows === 0 || info.cols === 0) { return; }
@@ -1099,7 +1560,7 @@ new ResizeObserver(render).observe(grid);
 function copy() {
   const t = target();
   if (!t || ended) { return; }
-  vscode.postMessage({ type: "copy", sel: t, page, label: selLabel() });
+  vscode.postMessage({ type: "copy", sel: t, page, view: qview() || null, label: selLabel() });
 }
 $("copy").addEventListener("click", copy);
 $("reload").addEventListener("click", () => invalidate(false));
@@ -1107,6 +1568,13 @@ $("rh").addEventListener("change", e => setDensity(+e.target.value));
 $("zi").addEventListener("click", () => setZoom(Z + 0.1));
 $("zo").addEventListener("click", () => setZoom(Z - 0.1));
 $("zl").addEventListener("click", () => setZoom(1));
+$("heat").addEventListener("click", () => {
+  heatOn = !heatOn;
+  $("heat").classList.toggle("on", heatOn);
+  $("heat-scale").style.display = heatOn ? "" : "none";
+  render();
+});
+$("heat-scale").addEventListener("change", e => { heatMode = e.target.value; render(); });
 for (const b of document.querySelectorAll("button[data-plot]")) {
   b.addEventListener("click", () => {
     if (b.dataset.code) { vscode.postMessage({ type: "plot", code: b.dataset.code }); }
@@ -1125,6 +1593,12 @@ function onMenu(m) {
     case "rowAutoFit": fitRows(visibleRowsOf(rowTargets(r)), false); break;
     case "rowReset": setRowHeights(rowTargets(r), rows.base); break;
     case "rowResetAll": keepTopLeft(() => rows.clear()); break;
+    case "freezeCols": freezeAt("col", c + 1); break;     // この列まで（0〜c）を固定
+    case "freezeRows": freezeAt("row", r + 1); break;
+    case "unfreeze": frozenR = 0; frozenC = 0; render(); break;
+    case "copyViewExpr":
+      if (view) { vscode.postMessage({ type: "clip", text: viewExpr(EXPR, info), label: "表示の式" }); }
+      break;
   }
 }
 

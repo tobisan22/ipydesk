@@ -1989,7 +1989,8 @@ export function activate(context: vscode.ExtensionContext) {
       return pickVariable();
     }),
     // Variable Editor の列見出し・行見出しの右クリックメニュー（webview/context）
-    ...(["colAutoFit", "colReset", "colResetAll", "rowAutoFit", "rowReset", "rowResetAll"] as VarMenuCmd[]).map(cmd =>
+    ...(["colAutoFit", "colReset", "colResetAll", "rowAutoFit", "rowReset", "rowResetAll",
+      "freezeCols", "freezeRows", "unfreeze", "copyViewExpr"] as VarMenuCmd[]).map(cmd =>
       vscode.commands.registerCommand(`ipydesk.varEditor.${cmd}`, (ctx?: { col?: unknown; row?: unknown }) => {
         varEditors.find(v => v.panel.active)?.menu(cmd, ctx);
       })),

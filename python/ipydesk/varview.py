@@ -135,25 +135,33 @@ def info(v: Any) -> dict:
     cls = type(v).__name__
     base: dict[str, Any] = {"cls": cls, "pages": [], "numeric": False, "labels": False}
 
-    if _mod(v) == "numpy":
+    if _mod(v) == "numpy" or _is_xr(v):
         import numpy as np
 
-        if isinstance(v, np.ndarray):
-            shape = list(v.shape)
-            rows = shape[0] if v.ndim >= 1 else 1
-            cols = shape[1] if v.ndim >= 2 else 1
+        if isinstance(v, np.ndarray) or _is_xr(v):
+            a = _arr(v)
+            shape = list(a.shape)
+            rows = shape[0] if a.ndim >= 1 else 1
+            cols = shape[1] if a.ndim >= 2 else 1
             if 0 in shape[2:]:  # 3 次元目以降に大きさ 0 の軸: 選べるページが無いので空の表
                 rows = 0
-            return {
+            out = {
                 **base,
                 "kind": "ndarray",
-                "cls": f"ndarray {v.dtype}",
+                "cls": f"{'DataArray' if _is_xr(v) else 'ndarray'} {a.dtype}",
                 "shape": shape,
+                "ndim": a.ndim,
                 "rows": rows,
                 "cols": cols,
                 "pages": shape[2:],
-                "numeric": _is_numeric_dtype(v.dtype),
+                "numeric": _is_numeric_dtype(a.dtype),
+                "dims": None,
+                "coords": None,
             }
+            if _is_xr(v):
+                out["xr"] = True
+                out["dims"], out["coords"] = _xr_labels(v)
+            return out
 
     if _mod(v) == "pandas":
         import numpy as np
@@ -168,6 +176,8 @@ def info(v: Any) -> dict:
                 "cols": v.shape[1],
                 "numeric": numeric,
                 "labels": True,
+                "rowLevels": int(v.index.nlevels),
+                "colLevels": int(v.columns.nlevels),
             }
         if cls == "Series":
             dt = v.dtype
@@ -180,6 +190,7 @@ def info(v: Any) -> dict:
                 "cols": 1,
                 "numeric": isinstance(dt, np.dtype) and _is_numeric_dtype(dt),
                 "labels": True,
+                "rowLevels": int(v.index.nlevels),
             }
 
     if isinstance(v, (list, tuple)):
@@ -211,17 +222,127 @@ def _span(lo: int, hi: int, n: int, cap: int) -> tuple[int, int]:
     return lo, hi
 
 
+# ---- xarray.DataArray（入っていれば。import はしない） ----------------------------------
+
+
+def _is_xr(v: Any) -> bool:
+    return _mod(v) == "xarray" and type(v).__name__ == "DataArray"
+
+
+def _arr(v: Any):
+    """配列の中身（DataArray は .values）"""
+    if _is_xr(v):
+        import numpy as np
+
+        return np.asarray(v.values)
+    return v
+
+
+MAX_COORDS = 1000  # 座標を見出しに使う軸の長さの上限
+
+
+def _xr_labels(v: Any) -> tuple[list[str], dict[str, list[str]]]:
+    """軸の名前と、短い軸の座標（見出し用）。座標の無い・長い軸は入れない"""
+    dims = [str(d) for d in v.dims]
+    coords: dict[str, list[str]] = {}
+    for k, d in enumerate(v.dims):
+        try:
+            if d in v.coords and v.shape[k] <= MAX_COORDS:
+                c = v.coords[d]
+                coords[str(k)] = [fmt(x) for x in getattr(c, "values", c)]
+        except Exception:
+            pass
+    return dims, coords
+
+
+# ---- 多次元配列の見え方（ビュー） ---------------------------------------------------
+
+
+def _norm_view(view: dict, shape: tuple) -> tuple[int, list[int], dict[int, int]]:
+    """ビュー {row, cols, fix} を確かめて正規化する。固定の番号は負なら後ろから、範囲外は端へ"""
+    nd = len(shape)
+    try:
+        row = int(view["row"])
+        cols = [int(c) for c in view["cols"]]
+        fix = {int(k): int(x) for k, x in (view.get("fix") or {}).items()}
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError("ビューの指定が正しくありません") from e
+    if not cols or sorted([row, *cols, *fix]) != list(range(nd)):
+        raise ValueError("ビューの指定が正しくありません（行 1 つ・列 1 つ以上・残りは固定）")
+    for k, x in fix.items():
+        n = shape[k]
+        x = x + n if x < 0 else x
+        fix[k] = max(0, min(x, n - 1))
+    return row, cols, fix
+
+
+class _Nd:
+    """配列を表（行 × 列）として読む。3 次元以上は view（行・列・固定）か page で 2 次元にする
+
+    view では、固定の軸を整数で切り出し（コピーなし）、行の軸を先頭・列の軸を後ろへ並べ替え
+    （これもコピーなし）、列の軸が 2 つ以上なら C 順で 1 列に並べる。取り出すときは
+    表示する範囲の添字だけを作るので、コピーは表示ブロックぶんだけ。
+    """
+
+    def __init__(self, a, page: list[int] | None = None, view: dict | None = None):
+        import numpy as np
+
+        self.view = False
+        if a.ndim == 0:
+            b = a.reshape(1, 1)
+        elif a.ndim == 1:
+            b = a.reshape(-1, 1)
+        elif a.ndim == 2:
+            b = a
+        elif view:
+            row, cols, fix = _norm_view(view, a.shape)
+            self.view = True
+            if any(a.shape[k] == 0 for k in fix):
+                b = np.empty((0, 1), dtype=a.dtype)
+            else:
+                b = a[tuple(fix.get(k, slice(None)) for k in range(a.ndim))]
+                rest = [k for k in range(a.ndim) if k not in fix]
+                b = b.transpose([rest.index(row)] + [rest.index(c) for c in cols])
+        elif 0 in a.shape[2:]:
+            b = np.empty((0, a.shape[1]), dtype=a.dtype)
+        else:
+            b = a[(slice(None), slice(None)) + tuple(_page_index(page, a.shape[2:]))]
+        self.b = b
+        self.colshape = tuple(b.shape[1:])
+        self.rows = int(b.shape[0])
+        self.cols = int(np.prod(self.colshape)) if self.colshape else 1
+
+    def get(self, r0: int, r1: int, c0: int, c1: int):
+        """[r0, r1) × [c0, c1) の 2 次元配列"""
+        import numpy as np
+
+        sub = self.b[r0:r1]
+        if len(self.colshape) == 1:
+            return sub[:, c0:c1]
+        ci = np.unravel_index(np.arange(c0, c1), self.colshape)
+        return sub[(slice(None),) + tuple(ci)]
+
+    def item(self, r: int, c: int):
+        import numpy as np
+
+        ci = np.unravel_index(c, self.colshape) if len(self.colshape) > 1 else (c,)
+        return self.b[(r,) + tuple(int(i) for i in ci)]
+
+
 def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None,
-          full: list[int] | None = None) -> dict:
+          full: list[int] | None = None, view: dict | None = None) -> dict:
     """[r0, r1) × [c0, c1) の範囲を文字列の 2 次元リストで返す（範囲は形に合わせて詰める）
 
     full: 行番号のリスト。その行のセルは改行を残し、上限を MAX_FULL_TEXT に広げる
     （Variable Editor で高くした行。折り返して表示する）
+    view: 3 次元以上の配列の見え方 {row, cols, fix}。指定したら答えに view: True を付ける
     """
     inf = info(v)
     kind = inf["kind"]
-    r0, r1 = _span(r0, r1, inf["rows"], MAX_ROWS)
-    c0, c1 = _span(c0, c1, inf["cols"], MAX_COLS)
+    nd = _Nd(_arr(v), page, view) if kind == "ndarray" else None
+    nrows, ncols = (nd.rows, nd.cols) if nd else (inf["rows"], inf["cols"])
+    r0, r1 = _span(r0, r1, nrows, MAX_ROWS)
+    c0, c1 = _span(c0, c1, ncols, MAX_COLS)
     out: dict[str, Any] = {"r0": r0, "r1": r1, "c0": c0, "c1": c1}
     fullset = {int(r) for r in (full or ()) if r0 <= int(r) < r1}
     if fullset:
@@ -231,19 +352,11 @@ def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = N
         f = r in fullset
         return [fmt(x, f) for x in xs]
 
-    if kind == "ndarray":
-        a = v
-        if inf["rows"] == 0:
-            cells = []
-        elif a.ndim == 0:
-            cells = [row(0, [a.item()])] if (r1 > r0 and c1 > c0) else []
-        elif a.ndim == 1:
-            cells = [row(r0 + i, [x]) if c1 > c0 else [] for i, x in enumerate(a[r0:r1])]
-        else:
-            idx = tuple(_page_index(page, a.shape[2:]))
-            sub = a[(slice(r0, r1), slice(c0, c1)) + idx]
-            cells = [row(r0 + i, xs) for i, xs in enumerate(sub)]
-        out["cells"] = cells
+    if nd is not None:
+        if nd.view:
+            out.update(view=True, vrows=nd.rows, vcols=nd.cols)
+        sub = nd.get(r0, r1, c0, c1)
+        out["cells"] = [row(r0 + i, xs) for i, xs in enumerate(sub)]
         return out
 
     if kind == "dataframe":
@@ -252,6 +365,10 @@ def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = N
         out["cells"] = [row(r0 + i, [col[i] for col in cols]) for i in range(sub.shape[0])]
         out["rowLabels"] = [fmt(x) for x in sub.index]
         out["colLabels"] = [fmt(x) for x in sub.columns]
+        if sub.index.nlevels > 1:
+            out["rowLevels"] = _levels(sub.index)
+        if sub.columns.nlevels > 1:
+            out["colLevels"] = _levels(sub.columns)
         return out
 
     if kind == "series":
@@ -260,6 +377,8 @@ def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = N
         out["cells"] = [row(r0 + i, [x]) if c1 > c0 else [] for i, x in enumerate(vals)]
         out["rowLabels"] = [fmt(x) for x in sub.index]
         out["colLabels"] = [fmt(v.name) if v.name is not None else "0"]
+        if sub.index.nlevels > 1:
+            out["rowLevels"] = _levels(sub.index)
         return out
 
     if kind == "list":
@@ -270,14 +389,25 @@ def block(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = N
     return out
 
 
+def _levels(idx) -> list[list[str]]:
+    """MultiIndex の段ごとのラベル（[段][番号]）"""
+    return [[fmt(t[k]) for t in idx] for k in range(idx.nlevels)]
+
+
 def collabels(v: Any) -> dict:
-    """列名の一覧（列幅を列名で覚えるため）。上限を超えたら labels は None"""
+    """列名の一覧（列幅を列名で覚えるため）。上限を超えたら labels は None
+
+    列が MultiIndex なら levels（段ごとのラベル）も返す。labels はタプル全体の文字列
+    """
     inf = info(v)
     if inf["kind"] == "dataframe":
         n = v.shape[1]
         if n > MAX_LABELS:
             return {"labels": None, "count": n}
-        return {"labels": [fmt(x) for x in v.columns], "count": n}
+        out = {"labels": [fmt(x) for x in v.columns], "count": n}
+        if v.columns.nlevels > 1:
+            out["levels"] = _levels(v.columns)
+        return out
     if inf["kind"] == "series":
         return {"labels": [fmt(v.name) if v.name is not None else "0"], "count": 1}
     return {"labels": None, "count": inf["cols"]}
@@ -296,14 +426,24 @@ def _jnum(x: Any) -> Any:
     return f
 
 
-def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None):
+def _dims(v: Any, inf: dict, page, view) -> tuple[Any, int, int]:
+    """(_Nd か None, 行数, 列数)。配列はビュー・ページを当てた表の大きさ"""
+    if inf["kind"] == "ndarray":
+        nd = _Nd(_arr(v), page, view)
+        return nd, nd.rows, nd.cols
+    return None, inf["rows"], inf["cols"]
+
+
+def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None,
+                view: dict | None = None):
     """統計に使う値（ndarray）と、数値の列数・全列数。数値が無ければ値は None"""
     import numpy as np
 
     inf = info(v)
     kind = inf["kind"]
-    r0, r1 = _span(r0, r1, inf["rows"], MAX_STATS_CELLS)
-    c0, c1 = _span(c0, c1, inf["cols"], MAX_STATS_CELLS)
+    nd, nrows, ncols = _dims(v, inf, page, view)
+    r0, r1 = _span(r0, r1, nrows, MAX_STATS_CELLS)
+    c0, c1 = _span(c0, c1, ncols, MAX_STATS_CELLS)
     all_cols = c1 - c0
     if (r1 - r0) * max(1, all_cols) > MAX_STATS_CELLS:
         raise ValueError(f"統計を計算できるのは {MAX_STATS_CELLS:,} セルまでです")
@@ -314,14 +454,8 @@ def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | No
         a = np.asarray(a)
         return a if _is_numeric_dtype(a.dtype) else None
 
-    if kind == "ndarray":
-        if v.ndim == 0:
-            a = num(v.reshape(1))
-        elif v.ndim == 1:
-            a = num(v[r0:r1])
-        else:
-            idx = tuple(_page_index(page, v.shape[2:]))
-            a = num(v[(slice(r0, r1), slice(c0, c1)) + idx])
+    if nd is not None:
+        a = num(nd.get(r0, r1, c0, c1))
         return a, (all_cols if a is not None else 0), all_cols
     if kind == "dataframe":
         sub = v.iloc[r0:r1, c0:c1]
@@ -352,11 +486,12 @@ def _stats_data(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | No
     return None, 0, all_cols
 
 
-def stats(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None) -> dict:
+def stats(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None,
+          view: dict | None = None) -> dict:
     """選択範囲の統計。std は N−1（MATLAB の std と同じ）"""
     import numpy as np
 
-    a, num_cols, all_cols = _stats_data(v, r0, r1, c0, c1, page)
+    a, num_cols, all_cols = _stats_data(v, r0, r1, c0, c1, page, view)
     out: dict[str, Any] = {"numCols": num_cols, "allCols": all_cols}
     if a is None or a.size == 0:
         out["kind"] = "none"
@@ -396,17 +531,14 @@ def stats(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = N
 # ---- セル 1 つの全文（インスペクタ、op cell） -----------------------------------------
 
 
-def _element(v: Any, r: int, c: int, page: list[int] | None) -> Any:
+def _element(v: Any, r: int, c: int, page: list[int] | None, view: dict | None = None) -> Any:
     inf = info(v)
-    if not (0 <= r < inf["rows"] and 0 <= c < inf["cols"]):
+    nd, nrows, ncols = _dims(v, inf, page, view)
+    if not (0 <= r < nrows and 0 <= c < ncols):
         raise IndexError(f"範囲外です（{r}, {c}）")
     kind = inf["kind"]
-    if kind == "ndarray":
-        if v.ndim == 0:
-            return v.item()
-        if v.ndim == 1:
-            return v[r]
-        return v[(r, c) + tuple(_page_index(page, v.shape[2:]))]
+    if nd is not None:
+        return nd.item(r, c)
     if kind == "dataframe":
         return v.iat[r, c]
     if kind == "series":
@@ -416,9 +548,9 @@ def _element(v: Any, r: int, c: int, page: list[int] | None) -> Any:
     return v
 
 
-def cell(v: Any, r: int, c: int, page: list[int] | None = None) -> dict:
+def cell(v: Any, r: int, c: int, page: list[int] | None = None, view: dict | None = None) -> dict:
     """セル 1 つの値を丸めずに返す（文字列は全文、数値は repr）"""
-    x = _element(v, int(r), int(c), page)
+    x = _element(v, int(r), int(c), page, view)
     t = type(x)
     tname = t.__name__ if t.__module__ in ("builtins", None) else f"{t.__module__.split('.')[0]}.{t.__name__}"
     if _mod(x) == "numpy" and isinstance(x, numbers.Number):
@@ -445,11 +577,13 @@ def _page_index(page: list[int] | None, dims: list[int] | tuple) -> list[int]:
     return [max(0, min(int(page[i]) if i < len(page) else 0, n - 1)) for i, n in enumerate(dims)]
 
 
-def copy_text(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None) -> str:
+def copy_text(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None = None,
+              view: dict | None = None) -> str:
     """範囲をタブ区切り（Excel に貼れる形）で返す。数値は丸めずに出す"""
     inf = info(v)
-    r0, r1 = _span(r0, r1, inf["rows"], MAX_COPY_CELLS)
-    c0, c1 = _span(c0, c1, inf["cols"], MAX_COPY_CELLS)
+    nd, nrows, ncols = _dims(v, inf, page, view)
+    r0, r1 = _span(r0, r1, nrows, MAX_COPY_CELLS)
+    c0, c1 = _span(c0, c1, ncols, MAX_COPY_CELLS)
     if (r1 - r0) * max(1, c1 - c0) > MAX_COPY_CELLS:
         raise ValueError(f"コピーできるのは {MAX_COPY_CELLS:,} セルまでです")
     kind = inf["kind"]
@@ -460,16 +594,10 @@ def copy_text(v: Any, r0: int, r1: int, c0: int, c1: int, page: list[int] | None
         return str(x)
 
     rows: list[list[Any]]
-    if inf["rows"] == 0:
+    if nrows == 0:
         rows = []
-    elif kind == "ndarray":
-        if v.ndim == 0:
-            rows = [[v.item()]]
-        elif v.ndim == 1:
-            rows = [[x] for x in v[r0:r1]]
-        else:
-            idx = tuple(_page_index(page, v.shape[2:]))
-            rows = [list(r) for r in v[(slice(r0, r1), slice(c0, c1)) + idx]]
+    elif nd is not None:
+        rows = [list(r) for r in nd.get(r0, r1, c0, c1)]
     elif kind == "dataframe":
         rows = v.iloc[r0:r1, c0:c1].to_numpy(dtype=object).tolist()
     elif kind == "series":
@@ -544,16 +672,17 @@ def _handle(req: dict, shell=None) -> dict:
         res: dict[str, Any] = {"id": rid, "ok": True, "scope": scope, "info": info(v)}
         op = req.get("op", "block")
         page = req.get("page")
+        view = req.get("view")
         if op == "copy":
-            res["text"] = copy_text(v, req["r0"], req["r1"], req["c0"], req["c1"], page)
+            res["text"] = copy_text(v, req["r0"], req["r1"], req["c0"], req["c1"], page, view)
         elif op == "block":
-            res["block"] = block(v, req["r0"], req["r1"], req["c0"], req["c1"], page, req.get("full"))
+            res["block"] = block(v, req["r0"], req["r1"], req["c0"], req["c1"], page, req.get("full"), view)
         elif op == "collabels":
             res.update(collabels(v))
         elif op == "stats":
-            res["stats"] = stats(v, req["r0"], req["r1"], req["c0"], req["c1"], page)
+            res["stats"] = stats(v, req["r0"], req["r1"], req["c0"], req["c1"], page, view)
         elif op == "cell":
-            res["cell"] = cell(v, req["r"], req["c"], page)
+            res["cell"] = cell(v, req["r"], req["c"], page, view)
         else:
             raise ValueError(f"知らない op です: {op}")
         return res

@@ -224,6 +224,8 @@ def openable(v: Any) -> bool:
         return getattr(v, "ndim", 0) >= 1 and t.__name__ == "ndarray"
     if mod == "pandas":
         return t.__name__ in ("DataFrame", "Series")
+    if mod == "xarray":
+        return t.__name__ == "DataArray" and getattr(v, "ndim", 0) >= 1
     return isinstance(v, (list, tuple)) and len(v) > 0
 
 

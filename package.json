@@ -2,7 +2,7 @@
   "name": "ipydesk",
   "displayName": "IPyDesk",
   "description": "MATLAB-style Python desktop for VS Code. Variables and figures stay after the run.",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "repository": { "type": "git", "url": "https://github.com/tobisan22/ipydesk.git" },
   "bugs": { "url": "https://github.com/tobisan22/ipydesk/issues" },
   "homepage": "https://github.com/tobisan22/ipydesk#readme",
@@ -61,7 +61,11 @@
       { "command": "ipydesk.varEditor.colResetAll", "title": "すべての列幅を既定に戻す" },
       { "command": "ipydesk.varEditor.rowAutoFit",  "title": "行の高さを自動調整" },
       { "command": "ipydesk.varEditor.rowReset",    "title": "行の高さを既定に戻す" },
-      { "command": "ipydesk.varEditor.rowResetAll", "title": "すべての行の高さを既定に戻す" }
+      { "command": "ipydesk.varEditor.rowResetAll", "title": "すべての行の高さを既定に戻す" },
+      { "command": "ipydesk.varEditor.freezeCols",  "title": "ここまでの列を固定" },
+      { "command": "ipydesk.varEditor.freezeRows",  "title": "ここまでの行を固定" },
+      { "command": "ipydesk.varEditor.unfreeze",    "title": "ウィンドウ枠の固定を解除" },
+      { "command": "ipydesk.varEditor.copyViewExpr", "title": "式をコピー" }
     ],
     "jsonValidation": [
       { "fileMatch": "**/.vscode/ipydesk_args.json", "url": "./resources/ipydesk_args.schema.json" }
@@ -95,7 +99,11 @@
         { "command": "ipydesk.varEditor.colResetAll", "when": "false" },
         { "command": "ipydesk.varEditor.rowAutoFit",  "when": "false" },
         { "command": "ipydesk.varEditor.rowReset",    "when": "false" },
-        { "command": "ipydesk.varEditor.rowResetAll", "when": "false" }
+        { "command": "ipydesk.varEditor.rowResetAll", "when": "false" },
+        { "command": "ipydesk.varEditor.freezeCols",  "when": "false" },
+        { "command": "ipydesk.varEditor.freezeRows",  "when": "false" },
+        { "command": "ipydesk.varEditor.unfreeze",    "when": "false" },
+        { "command": "ipydesk.varEditor.copyViewExpr", "when": "false" }
       ],
       "view/title": [
         { "command": "ipydesk.openVariable", "when": "view == ipydesk.workspace", "group": "navigation@1" },
@@ -121,7 +129,12 @@
         { "command": "ipydesk.varEditor.colResetAll", "when": "webviewId == 'ipydeskVariable' && webviewSection == 'colHeader'", "group": "1_width@3" },
         { "command": "ipydesk.varEditor.rowAutoFit",  "when": "webviewId == 'ipydeskVariable' && webviewSection == 'rowHeader'", "group": "1_height@1" },
         { "command": "ipydesk.varEditor.rowReset",    "when": "webviewId == 'ipydeskVariable' && webviewSection == 'rowHeader'", "group": "1_height@2" },
-        { "command": "ipydesk.varEditor.rowResetAll", "when": "webviewId == 'ipydeskVariable' && webviewSection == 'rowHeader'", "group": "1_height@3" }
+        { "command": "ipydesk.varEditor.rowResetAll", "when": "webviewId == 'ipydeskVariable' && webviewSection == 'rowHeader'", "group": "1_height@3" },
+        { "command": "ipydesk.varEditor.freezeCols",  "when": "webviewId == 'ipydeskVariable' && webviewSection == 'colHeader'", "group": "2_freeze@1" },
+        { "command": "ipydesk.varEditor.unfreeze",    "when": "webviewId == 'ipydeskVariable' && webviewSection == 'colHeader'", "group": "2_freeze@2" },
+        { "command": "ipydesk.varEditor.freezeRows",  "when": "webviewId == 'ipydeskVariable' && webviewSection == 'rowHeader'", "group": "2_freeze@1" },
+        { "command": "ipydesk.varEditor.unfreeze",    "when": "webviewId == 'ipydeskVariable' && webviewSection == 'rowHeader'", "group": "2_freeze@2" },
+        { "command": "ipydesk.varEditor.copyViewExpr", "when": "webviewId == 'ipydeskVariable' && webviewSection == 'viewExpr'", "group": "1_copy@1" }
       ],
       "editor/title/run": [
         { "command": "ipydesk.run", "when": "editorLangId == python", "group": "navigation@0" },
@@ -241,7 +254,7 @@
     "package": "npx @vscode/vsce package --target win32-x64",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test:unit": "tsc -p ./ && tsc --module node16 --target es2022 --strict --types node --outDir out --rootDir src src/test/argList.test.ts src/test/sizeAxis.test.ts && node --test out/test/argList.test.js out/test/sizeAxis.test.js"
+    "test:unit": "tsc -p ./ && tsc --module node16 --target es2022 --strict --types node --outDir out --rootDir src src/test/argList.test.ts src/test/sizeAxis.test.ts src/test/varCode.test.ts && node --test out/test/argList.test.js out/test/sizeAxis.test.js out/test/varCode.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

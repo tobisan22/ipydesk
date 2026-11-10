@@ -240,3 +240,128 @@ def test_workspace_total_counts_before_limit(tmp_path, monkeypatch):
     workspace.write(tmp_path, {f"v{i}": i for i in range(5)})
     data = json.loads((tmp_path / workspace.WORKSPACE_NAME).read_text(encoding="utf-8"))
     assert len(data["vars"]) == 3 and data["total"] == 5
+
+
+# ---- 0.2.0: 多次元配列のビュー・xarray・MultiIndex -----------------------------------------
+
+
+def _cells(b):
+    return [[float(x) for x in row] for row in b["cells"]]
+
+
+@pytest.mark.parametrize("shape", [(5, 3, 3), (3, 3, 7), (2, 3, 4, 5), (2, 2, 3, 2, 2)])
+def test_view_block_matches_numpy(shape):
+    rng = np.random.default_rng(1)
+    a = rng.integers(0, 1000, size=shape).astype(float)
+    nd = a.ndim
+    for row in range(nd):
+        rest = [k for k in range(nd) if k != row]
+        for ncols in range(1, nd):
+            cols = rest[:ncols]
+            fix = {k: -1 if k % 2 else 1 for k in rest[ncols:]}
+            fix = {k: (x if a.shape[k] > 1 else 0) for k, x in fix.items()}
+            view = {"row": row, "cols": cols, "fix": {str(k): x for k, x in fix.items()}}
+            idx = tuple(fix.get(k, slice(None)) for k in range(nd))
+            sub = a[idx]
+            rem = [k for k in range(nd) if k not in fix]
+            want = sub.transpose([rem.index(row)] + [rem.index(c) for c in cols]).reshape(a.shape[row], -1)
+            b = varview.block(a, 0, 999, 0, 999, view=view)
+            assert b["view"] is True and (b["vrows"], b["vcols"]) == want.shape
+            got = np.array(_cells(b)) if want.size else np.zeros(want.shape)
+            assert np.array_equal(got, np.round(want, 0)), (row, cols, fix)
+            # 一部の範囲
+            b = varview.block(a, 1, 3, 1, 4, view=view)
+            assert np.array_equal(np.array(_cells(b)).reshape(-1), want[1:3, 1:4].reshape(-1))
+
+
+def test_view_dcm_time_series():
+    R = np.arange(10001 * 9, dtype=float).reshape(10001, 3, 3)
+    b = varview.block(R, 7, 8, 0, 9, view={"row": 0, "cols": [1, 2], "fix": {}})
+    assert _cells(b)[0][4] == R[7, 1, 1], "セル [t, 4] は R[t, 1, 1]"
+    M = np.moveaxis(R, 0, 2)    # (3, 3, 10001)
+    b = varview.block(M, 7, 8, 0, 9, view={"row": 2, "cols": [0, 1], "fix": {}})
+    assert _cells(b)[0] == list(R[7].reshape(-1)), "MATLAB 流の並びでも同じ見え方"
+
+
+def test_view_noncontiguous_and_empty():
+    a = np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6)[:, ::2, ::-1]
+    b = varview.block(a, 0, 99, 0, 99, view={"row": 2, "cols": [0, 1], "fix": {}})
+    assert np.array_equal(np.array(_cells(b)), a.transpose(2, 0, 1).reshape(6, -1))
+    e = np.zeros((3, 0, 2))
+    b = varview.block(e, 0, 9, 0, 9, view={"row": 0, "cols": [2], "fix": {"1": 0}})
+    assert b["cells"] == [] and b["vrows"] == 0
+
+
+def test_view_is_validated():
+    a = np.zeros((2, 3, 4))
+    for bad in ({"row": 0, "cols": [], "fix": {"1": 0, "2": 0}}, {"row": 0, "cols": [1]},
+                {"row": 0, "cols": [0, 1], "fix": {"2": 0}}, {"cols": [1, 2]}):
+        with pytest.raises(ValueError):
+            varview.block(a, 0, 2, 0, 2, view=bad)
+
+
+def test_view_stats_copy_cell():
+    a = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+    view = {"row": 2, "cols": [0, 1], "fix": {}}
+    t = a.transpose(2, 0, 1).reshape(4, 6)
+    s = varview.stats(a, 1, 3, 2, 5, view=view)
+    assert s["n"] == 6 and s["max"] == t[1:3, 2:5].max()
+    assert varview.copy_text(a, 0, 1, 0, 6, view=view) == "\t".join(repr(float(x)) for x in t[0])
+    assert varview.cell(a, 3, 5, view=view)["text"] == repr(float(t[3, 5]))
+
+
+def test_view_handle_marks_response(monkeypatch):
+    monkeypatch.setattr(core, "ns_ready", True)
+    sh = Shell({"R": np.zeros((4, 3, 3))})
+    r = varview.handle({"id": "1", "op": "block", "expr": "R", "r0": 0, "r1": 4, "c0": 0, "c1": 9,
+                        "view": {"row": 0, "cols": [1, 2], "fix": {}}}, sh)
+    assert r["ok"] and r["block"]["view"] and len(r["block"]["cells"][0]) == 9
+    assert r["info"]["ndim"] == 3 and r["info"]["dims"] is None
+
+
+class _FakeCoord:
+    def __init__(self, values):
+        self.values = np.asarray(values)
+
+
+class DataArray:
+    """xarray を入れずに試すための最小の DataArray"""
+
+    def __init__(self, values, dims, coords):
+        self.values = np.asarray(values)
+        self.dims = tuple(dims)
+        self.coords = {k: _FakeCoord(v) for k, v in coords.items()}
+        self.shape = self.values.shape
+        self.ndim = self.values.ndim
+        self.dtype = self.values.dtype
+
+
+DataArray.__module__ = "xarray.core.dataarray"
+
+
+def test_xarray_dataarray():
+    da = DataArray(np.arange(24.0).reshape(2, 3, 4), ("run", "state", "time"),
+                   {"state": ["x", "vx", "y"], "time": np.arange(4) * 0.5})
+    i = varview.info(da)
+    assert i["kind"] == "ndarray" and i["xr"] and i["cls"] == "DataArray float64"
+    assert i["dims"] == ["run", "state", "time"]
+    assert i["coords"] == {"1": ["x", "vx", "y"], "2": ["0", "0.5", "1", "1.5"]}
+    b = varview.block(da, 0, 4, 0, 6, view={"row": 2, "cols": [0, 1], "fix": {}})
+    assert _cells(b)[1] == list(da.values[:, :, 1].reshape(-1))
+    assert workspace.openable(da)
+
+
+def test_multiindex_levels():
+    cols = pd.MultiIndex.from_tuples([("pos", "x"), ("pos", "y"), ("vel", "x")])
+    idx = pd.MultiIndex.from_product([["run0", "run1"], [0, 1]])
+    df = pd.DataFrame(np.arange(12.0).reshape(4, 3), index=idx, columns=cols)
+    i = varview.info(df)
+    assert (i["rowLevels"], i["colLevels"]) == (2, 2)
+    c = varview.collabels(df)
+    assert c["levels"] == [["pos", "pos", "vel"], ["x", "y", "x"]]
+    assert len(c["labels"]) == 3 and c["labels"][0] != c["labels"][2]
+    b = varview.block(df, 1, 3, 1, 3)
+    assert b["colLevels"] == [["pos", "vel"], ["y", "x"]]
+    assert b["rowLevels"] == [["run0", "run1"], ["1", "0"]]
+    flat = varview.block(pd.DataFrame({"a": [1]}), 0, 1, 0, 1)
+    assert "colLevels" not in flat and "rowLevels" not in flat
