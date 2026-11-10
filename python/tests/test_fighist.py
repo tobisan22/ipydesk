@@ -96,7 +96,8 @@ def test_payload_only_for_live_figures(tmp_path):
     fighist.capture(tmp_path)
     p = fighist.payload([1])
     assert len(p["history"]["1"]) == 1 and "1" in p["current"]
-    assert fighist.payload([2]) == {"history": {}, "current": {}}
+    assert set(p["touch"]) == {"1"}
+    assert fighist.payload([2]) == {"touch": {}, "history": {}, "current": {}}
 
 
 # ---- 実行の途中で描き直した図（0.0.6） ------------------------------------------
@@ -162,3 +163,45 @@ def test_not_installed_or_suspended_does_nothing(tmp_path):
     with fighist.suspended():
         plt.close(0)
     assert 0 not in fighist._current
+
+
+def touch():
+    return fighist.payload(plt.get_fignums())["touch"]
+
+
+def test_touch_marks_only_the_figure_drawn_to(tmp_path):
+    """描いた figure だけ touch が変わる（拡張はそのタブだけを前に出す）"""
+    for n in (1, 2, 3):
+        plt.figure(n)
+        plt.plot([1, 2])
+    fighist.capture(tmp_path)
+    before = touch()
+    assert before["1"] < before["2"] < before["3"]
+    fighist.capture(tmp_path)
+    assert touch() == before, "画像にしただけでは触ったことにしない"
+    plt.figure(1).gca().plot([2, 1])
+    fighist.capture(tmp_path)
+    after = touch()
+    assert after["2"] == before["2"] and after["3"] == before["3"]
+    assert after["1"] > before["3"], "最後に触った figure がいちばん大きい"
+
+
+def test_touch_ignores_browser_side_changes():
+    """webagg のサーバースレッドからの変更（タブのリサイズ・ズーム）は数えない"""
+    import threading
+
+    fig = plt.figure(1)
+    plt.plot([1, 2])
+    before = touch()
+    t = threading.Thread(target=lambda: fig.set_size_inches(3, 2), name="ipydesk-webagg")
+    t.start()
+    t.join()
+    assert touch() == before
+
+
+def test_touch_works_without_history(monkeypatch):
+    monkeypatch.setenv("IPYDESK_FIG_HISTORY", "0")
+    plt.figure(1)
+    before = touch()
+    plt.plot([1, 2])
+    assert touch()["1"] > before["1"]

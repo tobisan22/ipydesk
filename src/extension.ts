@@ -227,6 +227,7 @@ export function activate(context: vscode.ExtensionContext) {
     figInfo?: FigureInfo;                          // 最後に読んだ py_figures.json
     histCut: Map<number, number>;                  // 「履歴を消す」を押した時点の seq（これ以前は出さない）
     figIds: Map<number, string>;                   // タブが繋がっている figure の実体（py_figures.json の ids）
+    figTouch: Map<number, number>;                 // 最後に見た「触られた順番」（py_figures.json の touch）
     closedIds: Set<string>;                        // タブを閉じた figure の実体（Python が閉じるまで開き直さない）
     ws: WsData | null;                             // 最後に受け取った変数一覧
     error?: ErrInfo;                               // 直前の実行のエラー（次の実行で消える）
@@ -460,6 +461,7 @@ export function activate(context: vscode.ExtensionContext) {
   const closeFigurePanels = (s: Session) => {
     for (const p of [...s.figures.values()]) { disposeByExt(p); }
     s.figures.clear();
+    s.figTouch.clear();
   };
 
   /**
@@ -710,14 +712,30 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const syncFigurePanels = (s: Session, info: FigureInfo) => {
+  /**
+   * figure の一覧に合わせてタブを開く・閉じる。前に出すのは、前回から触られた figure だけ
+   * （info.touch が変わったもの・タブがまだ無いもの）。何枚も触られていたら、触られた順に
+   * 前へ出すので、最後に触られた figure がいちばん前に来る。
+   * 以前は全部を番号順に前へ出していたので、1 枚だけ描き直しても番号の大きい図が前に来ていた。
+   * revealAll: 利用者が「Figure を開く」などを明示的に行ったとき。触られていなくても前に出す
+   */
+  const syncFigurePanels = (s: Session, info: FigureInfo, revealAll = false) => {
     s.figInfo = info;
-    for (const n of info.figures) {
+    const touch = (n: number) => info.touch?.[String(n)];
+    const order = [...info.figures].sort((a, b) => (touch(a) ?? 0) - (touch(b) ?? 0) || a - b);
+    for (const n of order) {
       // タブを閉じたが Python がまだ閉じていない figure は開き直さない
       const id = info.ids?.[String(n)];
       if (id && s.closedIds.has(id)) { continue; }
-      openFigurePanel(s, info.url, n);
+      const t = touch(n);   // 古い ipydesk パッケージは touch を書かない → 従来どおり全部前に出す
+      if (revealAll || t === undefined || !s.figures.has(n) || s.figTouch.get(n) !== t) {
+        openFigurePanel(s, info.url, n);
+      }
     }
+    s.figTouch = new Map(info.figures.flatMap(n => {
+      const t = touch(n);
+      return t === undefined ? [] : [[n, t] as [number, number]];
+    }));
     // Python が閉じ終えた figure は、閉じた印を消す（id は別の figure に使い回されうる）
     const alive = new Set(Object.values(info.ids ?? {}));
     for (const id of [...s.closedIds]) { if (!alive.has(id)) { s.closedIds.delete(id); } }
@@ -1292,7 +1310,7 @@ export function activate(context: vscode.ExtensionContext) {
       isTransient: true,
     });
     const s: Session = {
-      id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), closedIds: new Set(), ws: null,
+      id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), figTouch: new Map(), closedIds: new Set(), ws: null,
       lastUsed: Date.now(),
       lastRun: scriptPath ? { script: scriptPath, cell, args: scriptArgs } : undefined,
     };
@@ -1703,7 +1721,7 @@ export function activate(context: vscode.ExtensionContext) {
       const s = active();
       const info = readFigures(s);
       if (s && info && info.figures.length > 0) {
-        syncFigurePanels(s, info);
+        syncFigurePanels(s, info, true);
         return;
       }
       // figure 情報が無い → webagg の一覧ページを Simple Browser で開く
@@ -2028,7 +2046,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
     // 閉じていた Figure タブも開き直す（右のグループに入る）
     if (s && figs && figs.figures.length > 0) {
-      syncFigurePanels(s, figs);
+      syncFigurePanels(s, figs, true);
     }
 
     // 2. パネル（下）にコンソール

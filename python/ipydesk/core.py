@@ -258,8 +258,8 @@ def notify_figures(vscode_dir: Path | None, only_if_changed: bool = False) -> No
 
     先に Figure の履歴を記録する（描き直された図の前の姿を画像で残す）。
     only_if_changed=True は、プロンプトで打った 1 行や停止中のコマンドの後に使う。
-    一覧も履歴も変わっていなければ書かない（書くと拡張が既存の Figure タブを前に出すため）。
-    F5 / セル実行の後は、変わっていなくても書いて図を前に出す。
+    一覧も履歴も変わっていなければ書かない。
+    拡張は、前回の通知から触られた figure（fighist の touch が変わったもの）のタブだけを前に出す。
     """
     global _last_figures
     if vscode_dir is None:

@@ -17,6 +17,8 @@ export interface FigureInfo {
   ids?: { [num: string]: string };      // figure の実体（close して同じ番号で作り直すと変わる）
   history?: { [num: string]: HistItem[] };
   current?: { [num: string]: { time: string; label: string } };
+  // 利用者のコードが figure を触った順番（全 figure で通しの番号。大きいほど後に触られた）
+  touch?: { [num: string]: number };
 }
 
 export interface HistItem {

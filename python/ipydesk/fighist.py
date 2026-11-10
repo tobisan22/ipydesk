@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -70,6 +71,19 @@ def set_label(text: str) -> None:
     _skipped.clear()
 
 
+# 利用者のコードが figure を触った順番（全 figure で通しの番号）。
+# 拡張はこれを見て、触られた figure のタブだけを前に出す（最後に触られたものがいちばん前）
+_touch_seq = 0
+_rendering = 0  # 履歴用に画像にしている間（その描画で立つ stale は「触った」に数えない）
+_SERVER_THREAD = "ipydesk-webagg"  # webagg.start_server が作るスレッドの名前
+
+
+def _next_touch() -> int:
+    global _touch_seq
+    _touch_seq += 1
+    return _touch_seq
+
+
 def _track(fig) -> None:
     """figure の中身が変わるたびに数を増やす（stale 通知を横取りして元の処理も呼ぶ）"""
     if getattr(fig, "_ipydesk_tracked", False):
@@ -78,18 +92,28 @@ def _track(fig) -> None:
 
     def cb(f, val):
         f._ipydesk_ver = getattr(f, "_ipydesk_ver", 0) + 1
+        # ブラウザ側の操作（タブの大きさに合わせたリサイズ・ズーム）はサーバースレッドから来る。
+        # それは利用者のコードが描いたのではないので、「触った」には数えない
+        if not _rendering and threading.current_thread().name != _SERVER_THREAD:
+            f._ipydesk_touch = _next_touch()
         if orig is not None:
             orig(f, val)
 
     fig.stale_callback = cb
     fig._ipydesk_ver = 1
+    fig._ipydesk_touch = _next_touch()
     fig._ipydesk_tracked = True
 
 
 def _render(fig) -> tuple[bytes, float, float]:
     """(PNG, 表示幅 px, 表示高さ px)。高 DPI の画面では dpi が倍になっているので、表示は割り戻す"""
+    global _rendering
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi="figure")
+    _rendering += 1
+    try:
+        fig.savefig(buf, format="png", dpi="figure")
+    finally:
+        _rendering -= 1
     ratio = getattr(fig.canvas, "device_pixel_ratio", 1) or 1
     return buf.getvalue(), fig.bbox.width / ratio, fig.bbox.height / ratio
 
@@ -285,8 +309,14 @@ def _push(folder: Path, num: int, snap: dict, limit: int) -> bool:
 
 
 def payload(nums: list[int]) -> dict:
-    """py_figures.json に載せる履歴と今の姿の見出し"""
+    """py_figures.json に載せる履歴・今の姿の見出し・触られた順番"""
+    touch = {}
+    for n, fig in _figures().items():
+        if n in nums:
+            _track(fig)  # 履歴が無効（上限 0）でも、触られた順番は数える
+            touch[str(n)] = fig._ipydesk_touch
     return {
+        "touch": touch,
         "history": {str(n): _history.get(n, []) for n in nums if _history.get(n)},
         "current": {
             str(n): {"time": c["time"], "label": c["label"]}
@@ -308,7 +338,8 @@ def forget(num: int, folder: Path | None = None) -> None:
 
 def reset() -> None:
     """テスト用"""
-    global _seq, label, _folder
+    global _seq, label, _folder, _touch_seq
+    _touch_seq = 0
     _current.clear()
     _history.clear()
     _steps.clear()
