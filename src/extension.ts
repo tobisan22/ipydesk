@@ -38,6 +38,11 @@ import { NotesViewProvider } from "./notesView";
 import { VariableEditor, VarLayout, VarMenuCmd, VarQuery } from "./variableEditor";
 import { FigureInfo, figureHtml } from "./figurePanel";
 import { registerRunFile } from "./runFile";
+import {
+  PySource, SOURCE_LABEL, expandPath, dotVenvPython, isUvVenvCfg, isUvProject, planInstall,
+  manualInstallCommand, InstallPlan, samePath,
+} from "./pyEnvCore";
+import { pythonFromExtension, onPythonEnvChange, findUv } from "./pythonEnv";
 
 const BP_NAME = "py_breakpoints.json";
 const STATE_NAME = "py_debug_state.json";
@@ -230,6 +235,7 @@ export function activate(context: vscode.ExtensionContext) {
     figTouch: Map<number, number>;                 // 最後に見た「触られた順番」（py_figures.json の touch）
     closedIds: Set<string>;                        // タブを閉じた figure の実体（Python が閉じるまで開き直さない）
     ws: WsData | null;                             // 最後に受け取った変数一覧
+    python?: { exe: string; source: PySource };    // 起動に使った Python とその取得元
     error?: ErrInfo;                               // 直前の実行のエラー（次の実行で消える）
     trace?: BpLoc[];                               // 赤丸のトレースで実行中なら、その赤丸（ステータスバーの ⚠）
     lastRun?: { script: string; cell?: { start: number; end: number }; args: string };   // 直前に送った実行（引数は実行した時点のもの）
@@ -369,7 +375,8 @@ export function activate(context: vscode.ExtensionContext) {
       status.show();
     } else if (a) {
       status.text = n > 1 ? `$(terminal) ${a.name}（${n} セッション）` : "$(terminal) IPyDesk session";
-      status.tooltip = "IPython セッション稼働中（クリックでセッションを切り替え）";
+      status.tooltip = "IPython セッション稼働中（クリックでセッションを切り替え）"
+        + (a.python ? `\nPython: ${a.python.exe}（${SOURCE_LABEL[a.python.source]}）` : "");
       status.backgroundColor = undefined;
       status.command = "ipydesk.selectSession";
       status.show();
@@ -826,7 +833,11 @@ export function activate(context: vscode.ExtensionContext) {
    * ipydesk 自身も見る — 同梱版を PYTHONPATH で通しているので、ここが null なら
    * ターミナルは必ず `No module named ipydesk` で落ちる。
    */
-  type Probe = { exe: string; missing: string[]; ipydesk: string | null };
+  type Probe = {
+    exe: string; missing: string[]; ipydesk: string | null;
+    pip: string | null;      // pip の場所（uv で作った venv には既定で無い）
+    prefix: string;          // sys.prefix（pyvenv.cfg を探す・uv プロジェクトの判定に使う）
+  };
 
   const PROBE_CODE = [
     "import json, sys",
@@ -843,6 +854,8 @@ export function activate(context: vscode.ExtensionContext) {
     "    'exe': sys.executable,",
     "    'missing': [m for m in sys.argv[1:] if where(m) is None],",
     "    'ipydesk': where('ipydesk'),",
+    "    'pip': where('pip'),",
+    "    'prefix': sys.prefix,",
     "}))",
   ].join("\n");
 
@@ -864,28 +877,125 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
 
-  const installDeps = (python: string, pkgs: string[], env: { [k: string]: string }) =>
+  /** 依存パッケージを入れる。cmd / args は pip・uv pip・uv add のどれか */
+  const installDeps = (
+    cmd: string, args: string[], pkgs: string[], env: { [k: string]: string }, cwd?: string) =>
     vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: `IPyDesk: ${pkgs.join(", ")} をインストールしています…`,
       },
       () => new Promise<boolean>(resolve => {
-        execFile(python, ["-m", "pip", "install", ...pkgs],
-          { env: { ...process.env, ...env }, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+        extLog(`DEPS  ${cmd} ${args.join(" ")}${cwd ? ` (cwd=${cwd})` : ""}`);
+        execFile(cmd, args,
+          { env: { ...process.env, ...env }, cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
           (err, _stdout, stderr) => {
             if (err) {
               const msg = (stderr || err.message).trim();
-              extLog(`DEPS  pip install 失敗: ${msg.slice(0, 400)}`);
+              extLog(`DEPS  インストール失敗: ${msg.slice(0, 400)}`);
               vscode.window.showErrorMessage(
                 `IPyDesk: インストールに失敗しました — ${msg.split("\n").pop()?.slice(0, 200)}`);
               resolve(false);
               return;
             }
-            extLog(`DEPS  pip install 成功: ${pkgs.join(", ")}`);
+            extLog(`DEPS  インストール成功: ${pkgs.join(", ")}`);
             resolve(true);
           });
       }));
+
+  /** 不足パッケージの入れ方を決める（pip / uv pip / uv add） */
+  const installPlanFor = async (probe: Probe): Promise<InstallPlan> => {
+    const ws = workspaceRoot();
+    let cfg: string | undefined;
+    try { cfg = fs.readFileSync(path.join(probe.prefix, "pyvenv.cfg"), "utf8"); } catch { /* venv ではない */ }
+    const uvVenv = isUvVenvCfg(cfg);
+    const uvProject = isUvProject(probe.prefix, ws, p => fs.existsSync(p));
+    const uv = await findUv(config().get<string>("uvPath", ""), ws);
+    const plan = planInstall({ hasPip: !!probe.pip, uvVenv, uvProject, uv, ws });
+    extLog(`DEPS  pip=${probe.pip ?? "なし"} uvVenv=${uvVenv} uvProject=${uvProject}`
+      + ` uv=${uv ?? "見つからない"} → ${plan.kind}`);
+    return plan;
+  };
+
+  /**
+   * 不足パッケージを入れるか利用者に聞いて入れる。
+   * 戻り値 false は「入れようとして失敗した」（起動を止める）。入れなかった・入れられない
+   * ときは true（診断の誤検出で操作不能になるのを避けるため、起動は続ける）。
+   */
+  const offerInstall = async (probe: Probe, pkgs: string[], env: { [k: string]: string }) => {
+    const plan = await installPlanFor(probe);
+    const msg = `IPyDesk: 依存パッケージが不足しています（${pkgs.join(", ")}）`;
+    switch (plan.kind) {
+      case "pip": {
+        const pick = await vscode.window.showWarningMessage(msg, "インストール", "あとで");
+        return pick !== "インストール"
+          || await installDeps(probe.exe, ["-m", "pip", "install", ...pkgs], pkgs, env);
+      }
+      case "uv": {
+        const pick = await vscode.window.showWarningMessage(`${msg}。uv で入れます`, "インストール", "あとで");
+        return pick !== "インストール"
+          || await installDeps(plan.uv, ["pip", "install", "--python", probe.exe, ...pkgs], pkgs, env);
+      }
+      case "uvProject": {
+        const ADD = "pyproject に追加";
+        const ONLY = "この環境にだけ入れる";
+        const pick = await vscode.window.showWarningMessage(
+          `${msg}。uv プロジェクトです — 「${ADD}」は uv add --dev で pyproject.toml と uv.lock を`
+          + `書き換えます。「${ONLY}」は uv pip install で入れますが、次の uv sync で消えます`,
+          ADD, ONLY, "あとで");
+        if (pick === ADD) {
+          return installDeps(plan.uv, ["add", "--dev", ...pkgs], pkgs, env, plan.root);
+        }
+        if (pick === ONLY) {
+          return installDeps(plan.uv, ["pip", "install", "--python", probe.exe, ...pkgs], pkgs, env);
+        }
+        return true;
+      }
+      case "none": {
+        const cmd = manualInstallCommand(plan, probe.exe, pkgs);
+        await vscode.env.clipboard.writeText(cmd);
+        void vscode.window.showWarningMessage(
+          `${msg}。この環境には pip が無く、uv も見つかりません。`
+          + (plan.uvProject
+            ? `ターミナルで ${cmd} を実行してください`
+            : `${cmd} で pip を入れるか、uv をインストールしてください（設定 ipydesk.uvPath でも指定できます）`)
+          + "（コマンドをクリップボードにコピーしました）");
+        return true;
+      }
+    }
+  };
+
+  /**
+   * 起動に使う Python の候補を順に返す（spec: python_env_spec.md 3 章）。
+   *  1. ipydesk.pythonPath を明示的に設定していればそれだけ（実行できなくても先に進まない）
+   *  2. Python 拡張で選択中の環境
+   *  3. ワークスペース直下の .venv
+   *  4. "python"
+   */
+  const pythonCandidates = async (scriptPath?: string):
+    Promise<{ exe: string; source: PySource }[]> => {
+    const ws = workspaceRoot();
+    const set = explicitly<string>("pythonPath");
+    if (set !== undefined && set.trim() !== "") {
+      return [{ exe: expandPath(set, ws, os.homedir()), source: "setting" }];
+    }
+    const out: { exe: string; source: PySource }[] = [];
+    const resource = scriptPath
+      ? vscode.Uri.file(scriptPath)
+      : vscode.workspace.workspaceFolders?.[0]?.uri;
+    const fromExt = await pythonFromExtension(resource);
+    if ("exe" in fromExt) {
+      out.push({ exe: fromExt.exe, source: "pythonExtension" });
+    } else {
+      extLog(`PYENV Python 拡張から取れない: ${fromExt.reason}`);
+    }
+    if (ws) {
+      const v = dotVenvPython(ws);
+      if (fs.existsSync(v)) { out.push({ exe: v, source: "dotVenv" }); }
+    }
+    out.push({ exe: "python", source: "default" });
+    return out;
+  };
 
   /** セッションを片付ける（ターミナルが閉じられた・再起動する） */
   const endSession = (s: Session) => {
@@ -1236,35 +1346,47 @@ export function activate(context: vscode.ExtensionContext) {
     // 再起動で引き継ぐ番号が、片付けから起動までの間に使われていたら空いている番号へ
     const sid = id !== undefined && !sessions.has(id) ? id : nextId();
     const sdir = path.join(vsdir, SESSIONS_DIR, String(sid));
-    const python = config().get<string>("pythonPath", "python");
     const bundled = config().get<boolean>("useBundledPython", true);
     const env = sessionEnv(sid, sdir);
     extLog(`SESSION #${sid} dir=${sdir}`);
-    extLog(`SESSION pythonPath=${python} useBundledPython=${bundled}`);
+    extLog(`SESSION useBundledPython=${bundled}`);
     extLog(`SESSION figureDisplay=${figureDisplay()} IPYDESK_MPL=${env.IPYDESK_MPL}`);
     extLog(`SESSION PYTHONPATH=${env.PYTHONPATH ?? "(未設定)"}`);
 
-    const probe = await probePython(python, env);
-    if ("error" in probe) {
-      extLog(`PROBE python を実行できない: ${probe.error.slice(0, 300)}`);
-      vscode.window.showErrorMessage(
-        `IPyDesk: Python を実行できません（${python}）。設定 ipydesk.pythonPath を確認してください`);
+    // 候補を順に試し、最初に実行できたものを使う
+    let probe: Probe | undefined;
+    let source: PySource = "default";
+    let lastErr = "";
+    const cands = await pythonCandidates(scriptPath);
+    for (const c of cands) {
+      const r = await probePython(c.exe, env);
+      if ("error" in r) {
+        lastErr = r.error;
+        extLog(`PROBE ${c.exe}（${c.source}）を実行できない: ${r.error.slice(0, 300)}`);
+        continue;
+      }
+      probe = r;
+      source = c.source;
+      break;
+    }
+    if (!probe) {
+      const hint = cands[0]?.source === "setting"
+        ? `設定 ipydesk.pythonPath（${cands[0].exe}）を確認してください`
+        : "VS Code 右下で Python 環境を選ぶか、設定 ipydesk.pythonPath を指定してください";
+      vscode.window.showErrorMessage(`IPyDesk: Python を実行できません — ${hint}`);
+      extLog(`PROBE 中止: ${lastErr.slice(0, 300)}`);
       return;
     }
-    extLog(`PROBE exe=${probe.exe}`);
+    extLog(`SESSION python=${probe.exe} source=${source}`);
     extLog(`PROBE ipydesk=${probe.ipydesk ?? "(import できない)"}`);
     extLog(`PROBE 不足モジュール: ${probe.missing.join(", ") || "なし"}`);
 
     if (probe.missing.length > 0) {
       const pkgs = probe.missing.map(
         m => REQUIRED_MODULES.find(r => r.mod === m)?.pip ?? m);
-      const pick = await vscode.window.showWarningMessage(
-        `IPyDesk: 依存パッケージが不足しています（${pkgs.join(", ")}）`,
-        "インストール", "あとで");
-      if (pick === "インストール" && !await installDeps(probe.exe, pkgs, env)) {
+      if (!await offerInstall(probe, pkgs, env)) {
         return;
       }
-      // 「あとで」でもセッションは起動する。診断の誤検出で操作不能になるのを避けるため。
     }
 
     // ipydesk 本体が見えなければ、起動しても必ず ModuleNotFoundError で落ちる。
@@ -1312,6 +1434,7 @@ export function activate(context: vscode.ExtensionContext) {
     const s: Session = {
       id: sid, name, dir: sdir, terminal, figures: new Map(), histCut: new Map(), figIds: new Map(), figTouch: new Map(), closedIds: new Set(), ws: null,
       lastUsed: Date.now(),
+      python: { exe: probe.exe, source },
       lastRun: scriptPath ? { script: scriptPath, cell, args: scriptArgs } : undefined,
     };
     sessions.set(sid, s);
@@ -2113,6 +2236,48 @@ export function activate(context: vscode.ExtensionContext) {
         s.terminal.dispose();
       }
       await startSession(undefined, undefined, s?.id);
+    }),
+  );
+
+  // ---- Python 環境の切り替えへの追従 ----
+  // 処理系はセッション起動時に決まる。右下の環境や ipydesk.pythonPath を変えても、
+  // 走っているセッションは変数を持っているので自動では置き換えず、聞いてから置き換える。
+  let askingPython = false;   // 環境の切り替えはイベントが続けて来ることがあるので 1 回だけ聞く
+  const offerPythonReplace = async (why: string) => {
+    if (askingPython || sessions.size === 0) { return; }
+    const s = active();
+    if (!s) { return; }
+    askingPython = true;
+    try {
+      const next = (await pythonCandidates(s.lastRun?.script))[0];
+      if (!next || (s.python && samePath(next.exe, s.python.exe))) { return; }
+      extLog(`PYENV ${why}: ${s.python?.exe ?? "?"} → ${next.exe}（${next.source}）`);
+      const pick = await vscode.window.showInformationMessage(
+        `IPyDesk: ${why}。アクティブなセッションを新しい環境（${next.exe}）で置き換えますか？（変数は消えます）`,
+        "置き換える");
+      if (pick !== "置き換える" || sessions.get(s.id) !== s) { return; }
+      if (starting) {
+        vscode.window.setStatusBarMessage("IPyDesk: セッションを起動中です", 3000);
+        return;
+      }
+      endSession(s);
+      s.terminal.dispose();
+      await startSession(undefined, undefined, s.id);
+    } finally {
+      askingPython = false;
+    }
+  };
+  context.subscriptions.push(
+    onPythonEnvChange(() => {
+      // pythonPath を明示的に設定しているときは、右下の選択は使っていない
+      const set = explicitly<string>("pythonPath");
+      if (set !== undefined && set.trim() !== "") { return; }
+      void offerPythonReplace("VS Code で選択中の Python 環境が変わりました");
+    }),
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration("ipydesk.pythonPath")) {
+        void offerPythonReplace("設定 ipydesk.pythonPath が変わりました");
+      }
     }),
   );
 

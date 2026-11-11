@@ -159,7 +159,12 @@
         "ipydesk.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "IPython セッションを起動する Python 実行ファイル"
+          "markdownDescription": "IPython セッションを起動する Python 実行ファイル。**未設定なら** Python 拡張で選択中の環境（VS Code 右下）→ ワークスペース直下の `.venv` → PATH 上の `python` の順に使います。`${workspaceFolder}` が使え、相対パスはワークスペース基準です（例: `${workspaceFolder}/.venv/Scripts/python.exe`）"
+        },
+        "ipydesk.uvPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "uv の実行ファイル。依存パッケージ（ipython など）を pip の無い uv の環境に入れるときに使います。空なら PATH 上の `uv` → `~/.local/bin` → `~/.cargo/bin` の順に探します"
         },
         "ipydesk.webaggPort": {
         "type": "number",
@@ -254,7 +259,7 @@
     "package": "npx @vscode/vsce package --target win32-x64",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test:unit": "tsc -p ./ && tsc --module node16 --target es2022 --strict --types node --outDir out --rootDir src src/test/argList.test.ts src/test/sizeAxis.test.ts src/test/varCode.test.ts && node --test out/test/argList.test.js out/test/sizeAxis.test.js out/test/varCode.test.js"
+    "test:unit": "tsc -p ./ && tsc --module node16 --target es2022 --strict --types node --outDir out --rootDir src src/test/argList.test.ts src/test/sizeAxis.test.ts src/test/varCode.test.ts src/test/pyEnvCore.test.ts && node --test out/test/argList.test.js out/test/sizeAxis.test.js out/test/varCode.test.js out/test/pyEnvCore.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

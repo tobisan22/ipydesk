@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- VS Code 右下（Python 拡張）で選んでいる Python 環境でセッションを起動するようにしました。uv や venv の `.venv` も、右下で選ぶだけで使えます。`ipydesk.pythonPath` を設定していないときは、右下の環境 → ワークスペース直下の `.venv` → PATH 上の `python` の順に使います。Python 拡張が入っていなくても動きます。
+- セッションの実行中に右下の環境や `ipydesk.pythonPath` を変えると、新しい環境でセッションを置き換えるかを聞くようにしました（変数は消えます）。
+- uv で作った環境（pip が入っていない）でも、不足パッケージを［インストール］で入れられるようにしました（`uv pip install`）。uv プロジェクトでは、`uv add --dev` で pyproject に追加するか、この環境にだけ入れるかを選べます。
+- 設定 `ipydesk.uvPath` を追加しました。空なら PATH・`~/.local/bin`・`~/.cargo/bin` から uv を探します。
+
+### Changed
+
+- `ipydesk.pythonPath` に `${workspaceFolder}` と相対パス（ワークスペース基準）を使えるようにしました。すでに設定している場合は、これまでどおりその Python を使います。
+- ステータスバーの「IPyDesk session」のツールチップに、使っている Python とその選ばれ方を出すようにしました。
+
 ## [0.2.2] - 2026-11-10
 
 ### Added

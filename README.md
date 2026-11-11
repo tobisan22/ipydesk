@@ -1,167 +1,55 @@
 # IPyDesk — MATLAB-style Python desktop for VS Code
 
-F5 で Python スクリプトを**常駐 IPython セッション**の中で実行します。
-赤丸（ブレークポイント）で止められ、**実行が終わっても変数と図がそのまま残ります**。
-MATLAB のように「実行 → 変数を確認 → 一部だけ実行し直す」を繰り返せます。
+[![Version](https://img.shields.io/visual-studio-marketplace/v/bisan.ipydesk)](https://marketplace.visualstudio.com/items?itemName=bisan.ipydesk)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/bisan.ipydesk)](https://marketplace.visualstudio.com/items?itemName=bisan.ipydesk)
+
+**Press F5 to run a Python script — its variables and figures stay after it finishes.**<br>
+**F5 で Python スクリプトを実行。終わっても、変数と図がそのまま残ります。**
 
 ![F5 で実行 → 図のタブで拡大・コピー・履歴](media/demo-figure.gif)
 
-- **F5 で実行、終わっても変数が残る**。プロンプトで続きの計算ができます
-- **赤丸で停止・ステップ実行**。debugpy を使わず、赤丸が無ければ通常と同じ速度で動きます
-- **`# %%` のセル実行**。重い前処理は 1 回だけにして、試したいセルだけを何度でも
-- **エラー後デバッグ**。落ちた行で止まった状態に、走り直さずに入れます
-- **図は VS Code のタブに表示**。`plt.show()` で止まらず、Ctrl+C で画像をコピーできます
-- **Workspace ビュー**で変数を一覧表示。複数セッションの並行実行にも対応
-- **Variable Editor** で配列・DataFrame を表で開き、選んだ範囲をボタン 1 つでプロット
-- **Open Desk** の 1 コマンドで、コード・図・変数・コンソールを MATLAB 風に並べる
-- **Notes ビュー**にメモを書ける。自動で保存され、どのフォルダを開いても同じメモが出ます
+## Overview
 
-## 動作環境
+IPyDesk runs your script inside a persistent IPython session, so you can work the MATLAB way:
+run, look at the variables, then re-run only the part you are working on.
 
-- **Windows 専用**（macOS / Linux では動きません）
-- Python 3.9 以上と、`ipython` `ipdb` `matplotlib` `tornado`
-  - 不足していれば初回の F5 で［インストール］を選ぶだけで入ります
-  - 自分で入れる場合: `python -m pip install ipython ipdb matplotlib tornado`
-- `ipydesk` パッケージは拡張に同梱されているため、`pip install ipydesk` は不要です
+- **Variables stay after the run** — keep computing at the prompt when the script ends
+- **Breakpoints and stepping** — click the gutter and press F5 (no debugpy, no `launch.json`)
+- **Cell execution** with `# %%` — run the heavy setup once, repeat only the cell you are trying
+- **Debug after an error** — jump to the failing line without re-running the script
+- **Figures in VS Code tabs** — `plt.show()` never blocks; copy a figure as an image with Ctrl+C
+- **Workspace view and Variable Editor** — open arrays and DataFrames as a table, and plot the selected range with one click
+
+Requirements: **Windows only**, Python 3.9 or later. The rest of this page is written in Japanese.
+
+## 概要
+
+IPyDesk は、スクリプトを**常駐 IPython セッション**の中で実行します。
+MATLAB のように「実行 → 変数を確認 → 一部だけ実行し直す」を繰り返せます。
+
+- **実行が終わっても変数が残る** — そのままプロンプトで続きの計算ができます
+- **赤丸（ブレークポイント）で停止・ステップ実行** — 行番号の左をクリックして F5 を押すだけ（debugpy も `launch.json` も不要）
+- **`# %%` のセル実行** — 重い前処理は 1 回だけにして、試したいセルだけを何度でも
+- **エラー後デバッグ** — 落ちた行で止まった状態に、走り直さずに入れます
+- **図は VS Code のタブに表示** — `plt.show()` で止まらず、Ctrl+C で画像としてコピーできます
+- **Workspace ビューと Variable Editor** — 配列・DataFrame を表で開き、選んだ範囲をボタン 1 つでプロット
 
 ## はじめかた
+
+**必要なもの**
+
+- **Windows**（macOS / Linux では動きません）
+- **Python 3.9 以上**
+- `ipython` `ipdb` `matplotlib` `tornado` — 足りなければ、初回の F5 で［インストール］を選ぶだけで入ります
+
+**手順**
 
 1. **フォルダを開きます**（ファイル → フォルダーを開く）。ファイル単体で開くと赤丸が効きません
 2. `.py` ファイルを開き、行番号の左をクリックして赤丸を置きます
 3. **F5** を押します。ターミナル「IPyDesk」が開き、赤丸の行で止まります
-4. F5 で続行します。最後まで進むと `In [n]:` に戻り、**変数がそのまま残っています**
+4. もう一度 F5 で続行します。最後まで進むと `In [n]:` に戻り、**変数がそのまま残っています**
 
-## キー操作
-
-| キー | 動作 |
-|---|---|
-| **F5** | 実行（2 回目以降は同じセッションで再実行。実行中なら別のセッションで実行） |
-| **Alt+F5** | 実行し、エラーが出たらその行で止まる |
-| **Ctrl+Alt+F5** | 新しいセッションで実行 |
-| **Ctrl+Enter** / **Shift+Enter** | セルを実行 / 実行して次のセルへ |
-| **Ctrl+Shift+Enter** | 選択範囲（選択が無ければ現在行）を実行。停止中は停止位置のフレームで実行 |
-| **F5 / F10 / F11 / Shift+F11** | 停止中: 続行 / ステップオーバー / ステップイン / ステップアウト |
-| **Shift+F5** | 停止中: デバッガを抜けてプロンプトへ |
-| **Ctrl+Shift+F5** | New Session：空のセッションを 1 つ追加する（既存のセッションはそのまま、スクリプトは実行しない） |
-| **Ctrl+C** | Figure タブ: 図を画像としてコピー |
-| **F5**（エクスプローラー） | 選んでいる `.bat` / `.cmd` / `.exe` / `.ps1` をターミナルで実行（下の「ファイルを実行する」） |
-
-## セル実行
-
-`# %%` の行でスクリプトを区切ると、Ctrl+Enter でカーソルのあるセルだけを実行できます。
-セルの最後が式なら値が `Out[n]` に表示され、赤丸もそのまま効きます。
-
-```python
-# %% データの準備（1 回だけ）
-import numpy as np
-x = np.linspace(0, 10, 100)
-
-# %% ここだけ何度も試す
-y = np.sin(2 * x)
-y.max()
-```
-
-> Jupyter 拡張に Ctrl+Enter を取られる場合は、`Ctrl+Shift+P` →
-> 「**IPyDesk: Use IPyDesk Cell Keys**」を実行してください。
-
-## スクリプトに引数を渡す
-
-`argparse` / `sys.argv` を使うスクリプトに、実行のたびに引数を渡せます。
-
-1. `Ctrl+Shift+P` →「**IPyDesk: Run with Arguments…**」（エディタ右上の ▷ の横のメニューにもあります）
-2. 一覧から引数を選んで Enter。新しい引数は、入力して「追加」を選びます（例: `--n 10 --in "C:\data\a b.csv"`）
-
-引数はスクリプトごとに**履歴（最大 10 件）**として残り、以後の **F5（Ctrl+F5・Alt+F5・新しいセッションでの実行を含む）では、選んである引数**が使われます。
-セル実行・選択範囲の実行・現在行の実行には引数は渡りません（`sys.argv` はスクリプト名だけです）。
-ステータスバーの `⚙` 項目に選択中の引数が表示され、クリックすると一覧から切り替えられます。一覧の項目の ✎ で編集、🗑 で削除、末尾の「(引数なし)」で引数なしにできます。
-実行はターミナルの履歴に `%ipydesk "…\sim.py" -- --n 10` の形で残るので、そのままコピーして再現できます。
-
-一覧は `.vscode/ipydesk_args.json` に保存され、手で編集できます（保存するとすぐ反映されます。一覧の右上の `{}` ボタンで開けます）。
-
-```json
-{
-  "version": 1,
-  "scripts": {
-    "sim/run_mc.py": ["--n 500 --seed 7", "--in \"C:\\data\\a b.csv\""]
-  }
-}
-```
-
-- キーはワークスペースからの相対パス、値は引数の文字列の配列です（先頭が新しい）。手で書くときは JSON のエスケープ（`\` → `\\`、`"` → `\"`）が要ります
-- どれを選んでいるかは個人の設定として VS Code 側に持つので、JSON には書かれません
-- JSON が壊れている間は、ファイルを上書きしません（直前の内容で動きます）
-- 端末で直接打った引数は履歴に残りません
-
-| 書き方 | 例 | 届く値 |
-|---|---|---|
-| 空白で区切る | `--n 10` | `--n`, `10` |
-| 空白を含む値は `"…"` / `'…'` | `--in "C:\d\a b.csv"` | `C:\d\a b.csv` |
-| `\` はそのまま（Windows のパス可） | `--in C:\d\x.csv` | `C:\d\x.csv` |
-| `"` を含む値は `'…'` で囲む | `--j '{"a": 1}'` | `{"a": 1}` |
-| `$x` や `{x}` は展開しない | `--n $x` | `$x` |
-
-- `"` と `'` の両方を含む値は書けません
-- 行末が `?` の引数は IPython のヘルプになるため、`"what?"` のように囲んでください
-- 端末で直接打つときも同じです: `%ipydesk x.py -- --n 10`
-- `python -m ipydesk x.py -- --n 10` でも起動できます
-
-## Git で共有するとき
-
-`.vscode/ipydesk_args.json` は**チームで共有できるファイル**です。
-
-- `.vscode` をコミットする場合は、実行のたびに書き換わる `py_breakpoints.json`・`py_workspace.json`・`py_sessions/` を `.gitignore` に入れてください
-- 共有しないなら `ipydesk_args.json` も `.gitignore` に入れます
-- 共有すると、ほかの人が試した引数も一覧に混ざります。上限 10 件による削除もチーム全体に効きます
-
-## エラーが出たとき
-
-エラーで止まらずにプロンプトへ戻り、ステータスバーに **⚠ エラー名（ファイル:行）** が出ます。
-クリックすると、**エラーが起きた行で止まった状態**に入れます。重い計算の最後で落ちても、走り直す必要はありません。
-
-## 図の表示
-
-figure ごとに VS Code のタブが開きます。📋 か Ctrl+C でコピー、💾 で png / svg / pdf に保存できます。
-
-**同じ figure を描き直すと、前の図がタブの上側に残ります。** F5 のたびに `plt.figure(1); plt.clf()` して描くスクリプトでも、
-上へスクロールすれば前回・前々回の図と見比べられます（いちばん下が今の図）。
-ループの中で `plt.subplots(num=0, clear=True)` / `plt.clf()` / `plt.close()` して同じ番号に描き直した場合も、
-消される直前の図が「途中 1」「途中 2」… として残ります（1 回の実行で figure ごとに上限枚数まで）。
-履歴の図は 📋 で画像としてコピーでき、「履歴を消す」でタブから消せます。
-残す枚数は `ipydesk.figureHistory`（既定 20、0 で無効）で変えられます。
-`plt.figure()` のように毎回新しい番号で作る場合は、これまでどおり別のタブになります。
-表示のしかたは `ipydesk.figureDisplay` で切り替えられます。
-
-## Variable Editor
-
-Workspace ビューで配列・DataFrame・Series・list を**ダブルクリック**すると（右クリック →「IPyDesk: Open Variable…」、
-行の ⊞ でも可）、表形式で開きます。`sim.state` や `d['k']` のような式は「IPyDesk: Open Variable…」で入力して開けます。
-
-- 100 万行の配列でも、見えている範囲だけを読むので軽く動きます。実行・ステップのたびに最新の値へ更新されます
-- ドラッグ・Shift+クリック・行／列見出しのクリックで範囲を選び、**📈 Plot / X–Y / Scatter / Hist / Image** を押すと図が出ます
-  - 実行されるのは `plt.plot(x[2:7, 1:3])` のような 1 行のコードで、ターミナルの履歴に残ります（ボタンにマウスを乗せると事前に確認できます）
-  - 図は変数ごとに 1 枚（`plt.figure("x")`）に描き直します。前に描いた図はそのタブの上側に残るので、スクロールして見比べられます
-  - 何も選んでいなければ全体が対象です
-  - 列見出しを **Ctrl+クリック**すると、離れた列をまとめて選べます（もう一度で外す）。**X–Y** はいちばん左の列が X、残りが Y です（time・altitude・speed を選べば `plt.plot(x[:, 0], x[:, [3, 7]])`）
-  - **Subplots** をオンにすると、2 列以上を同じ軸に重ねずに、列ごとに段を分けて描きます（X 軸は共有）
-- **Ctrl+C**（または Copy）で選択範囲をタブ区切りでコピー。Excel にそのまま貼れます（数値は丸めずに出ます）
-- 範囲を選ぶと、下に **n・min・max・mean・std(N−1)・NaN の数** を出します。数字をクリックすると丸めない値をコピーします
-- 列見出しの境目をドラッグで**列幅**、行見出しの下端をドラッグで**行の高さ**を変えられます。境目のダブルクリックで内容に合わせます。
-  高くした行は折り返して表示します（右クリックで「既定に戻す」など）
-- ツールバーで行の高さ（詰める／標準／広く）、Ctrl+ホイールで**表示倍率**（50〜200%）を変えられます。列幅・行の高さの設定・倍率は変数ごとに覚えます
-- **Inspect** で、選んだセルの値を下のペインに全文で表示します（長い文字列・改行を含む文字列など）
-- **Shift+Space** で行全体、**Ctrl+Space** で列全体を選びます
-- **3 次元以上の配列**は、表の上の次元バーで軸ごとに「行・列・固定」を選びます。列の軸を 2 つ以上にすると 1 列に並べて展開します
-  （`R.shape = (10001, 3, 3)` → 行 10001 × 列 9）。時系列らしい配列は開いたときに自動で展開します
-  - 今の見え方は `R.reshape(10001, -1)` のような式で表示し、クリックすると `:, 500, :` のような添字で指定できます
-  - 固定した軸の番号は ◀▶・ホイール・**Alt+↑↓** で変え、**Alt+←→** で固定の軸を切り替えます
-  - xarray の DataArray は、軸の名前と座標を見出しに使います
-- DataFrame の **MultiIndex** は見出しを段に分けて表示します
-- 見出しの右クリックで**ウィンドウ枠の固定**（ここまでの列・行を固定）、ツールバーの **Heat** で値の大きさに応じた色分けができます
-- ブレークポイントで停止中は、そのフレームの変数を表示・プロットします
-
-## Open Desk
-
-「**IPyDesk: Open Desk**」（Workspace ビュー右上の ⊞ アイコン）で、MATLAB のデスクトップのように並べます。
+「**IPyDesk: Open Desk**」（Workspace ビュー右上の ⊞）を実行すると、MATLAB のデスクトップのように並びます。
 
 ```
 ┌──────────┬──────────────┬──────────────┐
@@ -172,76 +60,51 @@ Workspace ビューで配列・DataFrame・Series・list を**ダブルクリッ
 └──────────┴─────────────────────────────┘
 ```
 
-セッションが無ければ空のセッションを起動し、閉じていた Figure タブも開き直します。
-Workspace を右側に置きたい場合は、ビューをセカンダリ サイド バーへドラッグしてください（VS Code が位置を覚えます）。
+## キー操作
 
-## ファイルを実行する（.bat / .exe など）
+| キー | 動作 |
+|---|---|
+| **F5** | 実行（停止中は続行） |
+| **Ctrl+F5** | 赤丸を無視して実行 |
+| **Alt+F5** | 実行し、エラーが出たらその行で止まる |
+| **Ctrl+Enter** / **Shift+Enter** | セルを実行 / 実行して次のセルへ |
+| **Ctrl+Shift+Enter** | 選択範囲（選択が無ければ現在行）を実行 |
+| **F10** / **F11** / **Shift+F11** | 停止中: ステップオーバー / ステップイン / ステップアウト |
+| **Shift+F5** | 停止中: デバッガを抜けてプロンプトへ |
+| **Ctrl+Shift+F5** | 空のセッションを新しく作る |
 
-エクスプローラーで `.bat` / `.cmd` / `.exe` / `.ps1` を選んで **F5**、または右クリックから実行できます。
+すべてのキーとコマンドは [実行とデバッグ](docs/run.md#キー操作の一覧) にあります。
 
-- **IPyDesk: Run File in Terminal**（F5）: VS Code のターミナルを開き、**そのファイルのフォルダで**実行します。
-  終わってもターミナルは残るので、出力を読んだり続けて入力したりできます。ターミナル名は `▶ ファイル名` です。
-  同じファイルをもう一度実行すると、前のターミナルを閉じて作り直します（動いている処理も止まります）
-- **IPyDesk: Run File (Like Double-Click)**: エクスプローラーでダブルクリックしたのと同じく、Windows の関連付けで起動します。VS Code とは切り離されます
-- 複数選んで実行すると、それぞれ実行します。エディタで開いていて未保存なら、保存してから実行します
-- エディタで `.bat` などを開いているときも、F5・右上の ▶・タブの右クリックから実行できます
-- `.ps1` は PowerShell（`-ExecutionPolicy Bypass`）で、ほかは cmd で実行します
-- 対象の拡張子は `ipydesk.runFileExtraExtensions` で増やせます（例: `[".vbs", ".py"]`。`.py` を足すと、エクスプローラーの F5 は関連付けの Python で実行します。エディタの F5 はこれまでどおり IPyDesk の実行です）
+## 詳しい使い方
 
-## メモ（Notes ビュー）
-
-アクティビティバーの IPyDesk に **NOTES** があり、セクションに分けてメモを書けます。
-
-- 入力すると自動で保存されます。保存先は**ユーザー単位**で、どのフォルダを開いても同じメモが出ます
-  （`%APPDATA%\Code\User\globalStorage\bisan.ipydesk\notes.md`）
-- **＋ セクション**で追加。見出しをクリックすると**名前を変更**できます（Enter で本文へ）
-- **▾ / ▸ で折りたたみ**（見出しのダブルクリックでも可）。**⇕** ですべて折りたたむ / すべて展開。折りたたんだ状態も保存されます
-- **⋮⋮ をドラッグして並べ替え**（見出しにマウスを乗せると出ます）。キーボードでは **Alt+↑ / Alt+↓**
-- **⧉ でセクションの本文をコピー**（Shift+クリックで `## 見出し` も含めてコピー）。**✕** で削除（本文があるときは 2 回クリック）
-- エディタで選択して右クリック →「**IPyDesk: Add Selection to Notes**」で、選択範囲（選択が無ければ現在行）を
-  ファイル名・行番号・時刻つきで追記します。追記先は最後に入力したセクション（無ければ最後のセクション）です
-- NOTES 右上のアイコン（IPyDesk: Open Notes File）で `notes.md` をエディタで開けます。
-  `notes.md` は Markdown で、`## 名前` の行がセクションの区切りです（コードブロックの中の `##` は区切りになりません）
-- VS Code を複数ウィンドウで開いていても、ほかのウィンドウで書いた内容が反映されます（同時に書いた場合は後から保存した方が残ります）
-
-最初は次の**デフォルトのメモ**が折りたたんで入っています。いらなければ普通のセクションと同じように ✕ で消せます（消しても再び入ることはありません。拡張の更新でデフォルトのメモが増えたときは、増えた分だけが入ります）。
-NOTES 右上の「…」→「**IPyDesk: Restore Default Notes**」で、消したデフォルトのメモだけを末尾に戻せます（同じ名前のセクションがあれば戻しません）。
-
-- IPyDesk のショートカット（キー操作・コマンド・停止中の ipdb コマンド）
-- matplotlib: subplots の基本
-- matplotlib: 軸の範囲・目盛り
-- 外部 exe の実行（subprocess）
-
-## 設定
-
-| 設定 | 既定 | 内容 |
-|---|---|---|
-| `ipydesk.pythonPath` | `python` | 使う Python の実行ファイル（フルパス可） |
-| `ipydesk.figureDisplay` | `tab` | 図の表示先: `tab` / `manual`（自動で開かない）/ `window`（別ウィンドウ）/ `none` |
-| `ipydesk.windowBackend` | `auto` | `window` のときのバックエンド: `auto` / `qt` / `tk` |
-| `ipydesk.webaggPort` | `8988` | 図の表示に使うポート |
-| `ipydesk.figureHistory` | `20` | 描き直した図を Figure タブに残す枚数（figure ごと。0 で無効） |
-| `ipydesk.showCellDecorations` | `true` | `# %%` の区切り線とセルの強調を表示する |
-| `ipydesk.runFileExtraExtensions` | `[]` | エクスプローラーから実行できるファイルに足す拡張子（`.bat` `.cmd` `.exe` `.ps1` は常に対象） |
-| `ipydesk.useBundledPython` | `true` | 同梱の `ipydesk` を使う（通常は変更不要） |
-
-`figureDisplay` を変えたら、通知の「置き換える」を押すか、Ctrl+Shift+F5 で新しいセッションを作ってください。
+| ガイド | 内容 |
+|---|---|
+| [実行とデバッグ](docs/run.md) | セッション、赤丸、セル実行、エラー後デバッグ、キー操作の一覧 |
+| [スクリプトに引数を渡す](docs/arguments.md) | `argparse` / `sys.argv` への引数、履歴、Git での共有 |
+| [図の表示](docs/figures.md) | Figure タブ、コピーと保存、描き直した図の履歴 |
+| [変数を見る](docs/variables.md) | Workspace ビュー、Variable Editor（表・プロット・多次元配列）、Open Desk |
+| [メモ（Notes ビュー）](docs/notes.md) | どのフォルダでも使えるメモ、コードの切り抜き |
+| [.bat / .exe などを実行する](docs/run-file.md) | エクスプローラーから F5 でファイルを実行 |
+| [設定](docs/settings.md) | 設定の一覧、`.vscode` に作られるファイル |
 
 ## うまく動かないとき
 
 | 症状 | 対処 |
 |---|---|
 | 赤丸で止まらない | **フォルダを開いて**、その中にスクリプトを置く |
-| 依存パッケージの確認が毎回出る | `ipydesk.pythonPath` に、パッケージを入れた Python のフルパスを指定する |
+| 依存パッケージの確認が毎回出る | VS Code 右下で、パッケージを入れた環境（uv・venv の `.venv` など）を選ぶ（[詳しく](docs/settings.md#python-環境の選び方)） |
 | 図が出ない / タブが空白 | `ipydesk.webaggPort` を別の番号に変えて Ctrl+Shift+F5 |
 | Ctrl+Enter でインタラクティブウィンドウが開く | 「IPyDesk: Use IPyDesk Cell Keys」を実行する |
+| 赤丸があると実行が遅い | Ctrl+F5 で赤丸を無視して実行する（[詳しく](docs/run.md#赤丸があると遅いとき)） |
 | 動きがおかしい | Ctrl+Shift+F5 で新しいセッションを作り、おかしくなったセッションのターミナルを閉じる |
 
-拡張の動作ログは `.vscode/py_ext_log.txt` に残ります。拡張は `.vscode/py_*` に連携用のファイルを作るので、
-git で管理している場合は `.gitignore` に `.vscode/py_*` を追加しておくと便利です。
+**制約**
 
-## 制約
-
-- 赤丸がある実行ではトレースが入るため遅くなります（赤丸が無ければ通常の速度）
-- 停止中のマウスホバーでの変数表示には未対応です（Workspace ビューか `ipdb>` で確認）
+- 停止中のマウスホバーでの変数表示には未対応です（Workspace ビューか `ipdb>` で確認します）
 - 標準ライブラリ・IPython・matplotlib の内部には F11 でも入りません
+
+## リンク
+
+- [変更履歴](CHANGELOG.md)
+- [不具合の報告・要望](https://github.com/tobisan22/ipydesk/issues)
+- ライセンス: [MIT](LICENSE)
