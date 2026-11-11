@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-11
+
 ### Added
 
 - VS Code 右下（Python 拡張）で選んでいる Python 環境でセッションを起動するようにしました。uv や venv の `.venv` も、右下で選ぶだけで使えます。`ipydesk.pythonPath` を設定していないときは、右下の環境 → ワークスペース直下の `.venv` → PATH 上の `python` の順に使います。Python 拡張が入っていなくても動きます。
